@@ -12,7 +12,7 @@ Pilot result on `Qwen/Qwen3-4B-Instruct-2507`, 2K training steps on WikiText-103
 - **Recall@K=128 climbing** from random → ~50% by step 500
 
 Checkpoints + headline results are mirrored at
-[https://huggingface.co/dalletest123/ann-sparseattention](https://huggingface.co/dalletest123/ann-sparseattention).
+[https://huggingface.co/datasysdev/ann-sparseattention](https://huggingface.co/datasysdev/ann-sparseattention).
 
 ## How it works
 
