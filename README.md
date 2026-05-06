@@ -157,6 +157,37 @@ a population-level estimate. Confidence intervals and downstream tasks
 6-layer subset to broad layer coverage. Checkpoints will be mirrored at
 [`datasysdev/ann-sparseattention`](https://huggingface.co/datasysdev/ann-sparseattention).
 
+## Relation to RetrievalAttention
+
+The closest prior work is RetrievalAttention (Liu et al., 2024). They show
+that **vanilla ANN over the model's native Q and K vectors fails** because
+Q and K live in mismatched distributions — they were never trained to be
+each other's nearest neighbors, only to score correctly via the dot
+product. Their fix is at *index time*: an attention-aware graph
+construction (RoarGraph-style) that compensates for the Q/K out-of-
+distribution problem at search time.
+
+This work attacks the same problem from the opposite direction. Instead of
+patching the index over hostile vectors, we **train a tiny shared
+low-dimensional projection** (`W_Qs, W_Ks → R^64`) so that `q_search` and
+`k_search` *do* live in the same distribution by construction. Off-the-
+shelf FAISS HNSW with default parameters is then sufficient — there is no
+attention-aware index trick.
+
+| | Search space | Index | Trainable |
+|---|---|---|---|
+| Raw Q/K + vanilla ANN | original Q/K | off-the-shelf | no — fails (Q/K OOD) |
+| RetrievalAttention | original Q/K | attention-aware graph | no |
+| **This work** | **learned Q\_s / K\_s** | **off-the-shelf** | **yes (~2-11M params)** |
+
+The contribution claim: *eliminate the Q/K mismatch at index-build time
+via distillation, instead of patching it at search time.* The clean
+experiment to validate this — vanilla FAISS over raw Q/K vs. vanilla
+FAISS over learned Q\_s/K\_s vs. exact teacher top-K, all at the same K —
+is the next planned run. The current pilot establishes that the learned
+projections retrieve attention-relevant keys; the comparison run isolates
+how much of that came from the projection vs. the ANN approximation.
+
 ## How it works
 
 For each full-attention layer `i` we train two linear projections
