@@ -124,13 +124,29 @@ def make_headline_config() -> Config:
     """
     cfg = Config()
     cfg.seq_len = 8192
-    cfg.total_steps = 8000
-    cfg.warmup_steps = 400
+    cfg.total_steps = 6000
+    cfg.warmup_steps = 200
     cfg.eval_every = 1000
-    cfg.save_every = 500          # 11M params * float32 = ~44 MB; cheap
+    cfg.save_every = 500
     cfg.keep_last_n_checkpoints = 8
     cfg.full_attention_layer_indices = list(range(36))
     cfg.reserved_full_attention_indices = [0, 35]
     cfg.eval_num_batches = 32
-    cfg.wandb_run_name = "headline-8k-34layers"
+    cfg.wandb_run_name = "headline-34layers-d64"
+    cfg.checkpoint_dir = "/tmp/checkpoints_headline"
+    return cfg
+
+
+def make_headline_d128_config() -> Config:
+    """
+    Capacity ablation: same as headline but d_search=128.
+    Tests whether the pilot's PPL-gap plateau is set by training (no), data
+    (no), or projection capacity (the question). If d=128 closes the gap
+    further, capacity was the bottleneck; if not, the technique has bottomed
+    out for this architecture.
+    """
+    cfg = make_headline_config()
+    cfg.d_search = 128
+    cfg.wandb_run_name = "headline-d128-34layers"
+    cfg.checkpoint_dir = "/tmp/checkpoints_headline_d128"
     return cfg

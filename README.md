@@ -13,11 +13,20 @@ Pilot on `Qwen/Qwen3-4B-Instruct-2507`, 2K training steps on WikiText-103,
 | 500 | 47.4% | 1.21% |
 | 1000 | 50.7% | 0.68% |
 | 1500 | 50.9% | 0.68% |
+| **2000 (final)** | **50.9%** | **0.71%** |
 
 PPL gap is the primary signal: at <1% the model's output is preserved
 under ANN substitution. Recall plateaus around step 1000 because the
 softmax-relevant keys are concentrated in the top ~30 — disagreement on
 positions 30-128 is on near-zero-weight tail that doesn't affect output.
+
+**Pilot checkpoint** (step 2000): mirrored at
+[`datasysdev/ann-sparseattention`](https://huggingface.co/datasysdev/ann-sparseattention).
+A K-retrieve sweep (Pareto curve over K ∈ {16, 32, 64, 128, 256, 512}) is
+appended below once the eval finishes.
+
+A 34-layer headline run (8K context, 6K steps) follows the pilot — that's
+the deployment-relevant claim that the technique scales to dense application.
 
 Checkpoints + headline results are mirrored at
 [https://huggingface.co/datasysdev/ann-sparseattention](https://huggingface.co/datasysdev/ann-sparseattention).

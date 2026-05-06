@@ -558,4 +558,27 @@ def train(config: Config):
 
 
 if __name__ == "__main__":
-    train(Config())
+    import argparse
+
+    from config import make_headline_config, make_headline_d128_config
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--config",
+        default="pilot",
+        choices=["pilot", "headline_d64", "headline_d128"],
+        help="Which preset config to use.",
+    )
+    args = parser.parse_args()
+
+    if args.config == "pilot":
+        cfg = Config()
+    elif args.config == "headline_d64":
+        cfg = make_headline_config()
+    elif args.config == "headline_d128":
+        cfg = make_headline_d128_config()
+
+    print(f"[config] preset={args.config} run={cfg.wandb_run_name} "
+          f"steps={cfg.total_steps} layers={len(get_layers_to_train(cfg))} "
+          f"d_search={cfg.d_search} ckpt_dir={cfg.checkpoint_dir}")
+    train(cfg)
