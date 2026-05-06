@@ -1,22 +1,27 @@
 """
-ANN-substituted attention runtime.
+ANN-substituted attention.
 
-Installs an `ANNAttentionWrapper` on each trained full-attention layer. When
-the model's forward pass reaches one of these layers, the wrapper:
+Two retrieval paths:
+  * `_exact_topk_search`  — builds the dense [B, L, L] similarity matrix and
+    takes top-K. Quadratic in L; used for analysis (recall, mass@K, PPL gap).
+  * `_faiss_topk_search`  — per-batch CPU FAISS HNSW index. Correct, but
+    a research-quality prototype: it does GPU→CPU transfers, builds an
+    index per forward, and filters causal hits with a Python loop. Not a
+    deployable runtime. A production runtime would use a GPU-resident topk
+    kernel (Triton / CUTLASS) or a paged GPU index that's incrementally
+    updated alongside the KV cache.
 
-  1. Computes Q, K, V (and applies RoPE) as the original attention does.
-  2. Computes (q_search, k_search) from the same hidden state via the trained
-     SearchProjection.
-  3. For each query position q, retrieves the top-K_retrieve key indices using
-     exact top-K over (q_search @ k_search^T), causal-masked. (FAISS path
-     available via `use_faiss=True` for true ANN at long context.)
-  4. Computes standard attention restricted to the retrieved K_retrieve keys.
+Both paths share the same wrapper that monkey-patches a target layer's
+self-attention forward:
+  1. Compute Q, K, V + Qwen3 q_norm/k_norm + RoPE as the original does.
+  2. Get (q_search, k_search) from the trained SearchProjection.
+  3. Retrieve top-K key indices (causal-respecting).
+  4. Run standard attention restricted to the retrieved K keys.
 
-The result has the same shape as full attention; the rest of the model is
-untouched.
-
-Used both for end-to-end perplexity comparison in eval and for production
-inference.
+The helpers in this module set `use_cache=False`, so the substitution path
+is prefill-only. Adding decode-mode requires either incremental
+index updates per generated token, or a different wrapper that consumes the
+KV cache directly. Out of scope for the pilot/headline reported here.
 """
 
 from __future__ import annotations

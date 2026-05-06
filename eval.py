@@ -24,6 +24,44 @@ def _causal_mask(L: int, device) -> torch.Tensor:
     return torch.ones(L, L, device=device, dtype=torch.bool).tril()
 
 
+def _per_position_mass_at_k(
+    teacher_full: torch.Tensor,   # [B, H, L, L]  per-head teacher distribution
+    q_search: torch.Tensor,        # [B, L, d_search]
+    k_search: torch.Tensor,
+    K: int,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Teacher-attention mass captured by the search top-K.
+
+    Returns
+      per_head_mass: [B, H, L]   — sum of teacher prob at retrieved positions
+      avg_mass:      [B, L]      — averaged over heads
+
+    This is the metric that actually correlates with PPL preservation — set
+    recall@K is binary "did we hit the right keys?" but mass@K weights each
+    retrieved key by how much probability the teacher actually puts on it.
+    """
+    B, H, L, _ = teacher_full.shape
+    device = q_search.device
+    causal = _causal_mask(L, device)
+
+    q_n = F.normalize(q_search, dim=-1)
+    k_n = F.normalize(k_search, dim=-1)
+    sim = torch.bmm(q_n, k_n.transpose(1, 2)).masked_fill(~causal, -1e9)
+    K_eff = min(K, L)
+    search_top = sim.topk(K_eff, dim=-1).indices                  # [B, L, K]
+
+    # Build a [B, L, L] bool mask of retrieved positions, then broadcast to heads.
+    grid = torch.zeros(B, L, L, dtype=torch.bool, device=device)
+    grid.scatter_(-1, search_top, True)                            # [B, L, L]
+    grid = grid.unsqueeze(1).expand(B, H, L, L)
+
+    # For each (b, h, q), sum teacher probabilities over the retrieved keys.
+    per_head_mass = (teacher_full * grid.to(teacher_full.dtype)).sum(-1)  # [B, H, L]
+    avg_mass = per_head_mass.mean(dim=1)                                  # [B, L]
+    return per_head_mass, avg_mass
+
+
 def _per_position_recall(
     teacher: torch.Tensor,  # [B, L, L] head-aggregated
     q_search: torch.Tensor,  # [B, L, d_search]
@@ -195,6 +233,9 @@ def evaluate(base_model, search_module, capture, config, tokenizer) -> Dict:
         "eval/recall_at_K_avg": 0.0,         # at K_eval
         "eval/recall_curve": {},             # K -> avg recall across layers
         "eval/recall_curve_per_layer": {},   # layer_idx -> {K -> recall}
+        "eval/mass_at_K_per_layer": {},     # at K_eval
+        "eval/mass_at_K_avg": 0.0,           # at K_eval — primary retrieval metric
+        "eval/mass_curve": {},               # K -> avg mass across layers
         "eval/ppl_full": 0.0,
         "eval/ppl_ann": 0.0,
         "eval/ppl_gap_relative": 0.0,
@@ -203,6 +244,9 @@ def evaluate(base_model, search_module, capture, config, tokenizer) -> Dict:
 
     # Per-layer, per-K accumulators.
     recall_acc: Dict[int, Dict[int, List[float]]] = {
+        idx: {K: [] for K in K_curve} for idx in layers_to_train
+    }
+    mass_acc: Dict[int, Dict[int, List[float]]] = {
         idx: {K: [] for K in K_curve} for idx in layers_to_train
     }
     full_ppls, ann_ppls, router_matches = [], [], []
@@ -216,9 +260,9 @@ def evaluate(base_model, search_module, capture, config, tokenizer) -> Dict:
             q_dict, k_dict = search_module(hidden_states_dict)
 
             for layer_idx in layers_to_train:
+                teacher_full = attn_weights_dict[layer_idx]   # [B, H, L, L]
                 teacher = aggregate_heads(
-                    attn_weights_dict[layer_idx],
-                    mode=config.teacher_head_aggregation,
+                    teacher_full, mode=config.teacher_head_aggregation
                 )
                 for K in K_curve:
                     rec = _per_position_recall(
@@ -229,6 +273,15 @@ def evaluate(base_model, search_module, capture, config, tokenizer) -> Dict:
                     mask = pos >= K
                     vals = rec.masked_select(mask)
                     recall_acc[layer_idx][K].extend(vals.tolist())
+
+                    # mass@K: teacher attention probability captured by
+                    # the search top-K. Better than recall when softmax
+                    # is sharp.
+                    _, mass = _per_position_mass_at_k(
+                        teacher_full, q_dict[layer_idx], k_dict[layer_idx], K
+                    )  # [B, L]
+                    mass_vals = mass.masked_select(mask)
+                    mass_acc[layer_idx][K].extend(mass_vals.tolist())
 
             # --- end-to-end ppl + router stability ---
             ppl_full = compute_perplexity_full_attention(base_model, input_ids)
@@ -262,6 +315,24 @@ def evaluate(base_model, search_module, capture, config, tokenizer) -> Dict:
             sum(metrics["eval/recall_curve_per_layer"][li][K] for li in layers_to_train)
             / max(1, len(layers_to_train))
         )
+        for K in K_curve
+    }
+
+    # mass@K aggregation
+    for layer_idx in layers_to_train:
+        vals = mass_acc[layer_idx][K_eval]
+        metrics["eval/mass_at_K_per_layer"][layer_idx] = (
+            sum(vals) / max(1, len(vals))
+        )
+    metrics["eval/mass_at_K_avg"] = (
+        sum(metrics["eval/mass_at_K_per_layer"].values())
+        / max(1, len(metrics["eval/mass_at_K_per_layer"]))
+    )
+    metrics["eval/mass_curve"] = {
+        K: sum(
+            sum(mass_acc[li][K]) / max(1, len(mass_acc[li][K]))
+            for li in layers_to_train
+        ) / max(1, len(layers_to_train))
         for K in K_curve
     }
 

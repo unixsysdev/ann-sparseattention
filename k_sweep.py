@@ -24,6 +24,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from config import Config  # noqa: E402
 from data import build_eval_data  # noqa: E402
 from eval import (  # noqa: E402
+    _per_position_mass_at_k,
     _per_position_recall,
     compute_perplexity,
 )
@@ -95,24 +96,36 @@ def k_sweep(ckpt_path: str, K_values=(16, 32, 64, 128, 256, 512), num_batches: i
 
     for K in K_values:
         print(f"\n=== K = {K} ===")
-        # Recall@K (using cached captures)
-        per_layer = {idx: [] for idx in layers_to_train}
+        # Recall@K + mass@K (using cached captures)
+        per_layer_recall = {idx: [] for idx in layers_to_train}
+        per_layer_mass = {idx: [] for idx in layers_to_train}
         for input_ids, h_dict, w_dict, q_dict, k_dict in cached:
             for idx in layers_to_train:
+                teacher_full = w_dict[idx]   # [B, H, L, L]
                 teacher = aggregate_heads(
-                    w_dict[idx], mode=cfg.teacher_head_aggregation
+                    teacher_full, mode=cfg.teacher_head_aggregation
                 )
                 rec = _per_position_recall(teacher, q_dict[idx], k_dict[idx], K)
                 B, L = rec.shape
                 pos = torch.arange(L, device=rec.device).unsqueeze(0).expand(B, L)
                 mask = pos >= K
-                per_layer[idx].extend(rec.masked_select(mask).tolist())
+                per_layer_recall[idx].extend(rec.masked_select(mask).tolist())
+
+                _, mass = _per_position_mass_at_k(
+                    teacher_full, q_dict[idx], k_dict[idx], K
+                )
+                per_layer_mass[idx].extend(mass.masked_select(mask).tolist())
 
         recall_per_layer = {
-            idx: sum(per_layer[idx]) / max(1, len(per_layer[idx]))
+            idx: sum(per_layer_recall[idx]) / max(1, len(per_layer_recall[idx]))
             for idx in layers_to_train
         }
         recall_avg = sum(recall_per_layer.values()) / len(recall_per_layer)
+        mass_per_layer = {
+            idx: sum(per_layer_mass[idx]) / max(1, len(per_layer_mass[idx]))
+            for idx in layers_to_train
+        }
+        mass_avg = sum(mass_per_layer.values()) / len(mass_per_layer)
 
         # PPL gap with ANN substitution at this K
         wrappers = install_ann_attention(
@@ -136,11 +149,14 @@ def k_sweep(ckpt_path: str, K_values=(16, 32, 64, 128, 256, 512), num_batches: i
         results["by_K"][K] = {
             "recall_avg": recall_avg,
             "recall_per_layer": recall_per_layer,
+            "mass_avg": mass_avg,
+            "mass_per_layer": mass_per_layer,
             "ppl_ann": ppl_ann,
             "ppl_gap_relative": ppl_gap,
         }
         print(
-            f"  recall_avg = {recall_avg:.4f}   "
+            f"  mass_avg   = {mass_avg:.4f}   "
+            f"recall_avg = {recall_avg:.4f}   "
             f"ppl_ann = {ppl_ann:.4f}   ppl_gap = {ppl_gap:+.3%}"
         )
 

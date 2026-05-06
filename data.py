@@ -75,15 +75,20 @@ class LongContextPackedDataset(IterableDataset):
         num_workers = 1 if worker_info is None else worker_info.num_workers
 
         if not self.pack:
+            # No packing: one example per emitted item. Short docs are padded
+            # to seq_len with attention_mask=0 on the pad positions; long docs
+            # are truncated. attention_mask is the load-bearing field for
+            # ignoring padding during teacher capture and PPL eval.
             for i, ids in enumerate(self._iter_token_streams()):
                 if i % num_workers != worker_id:
                     continue
+                content_len = min(len(ids), self.seq_len)
                 if len(ids) < self.seq_len:
                     pad_len = self.seq_len - len(ids)
                     ids = ids + [self.eos_id or 0] * pad_len
                 else:
                     ids = ids[: self.seq_len]
-                yield self._make_item(ids, [0])
+                yield self._make_item(ids, [0], content_len=content_len)
             return
 
         buf: List[int] = []
@@ -108,7 +113,10 @@ class LongContextPackedDataset(IterableDataset):
                     boundaries = [0] + boundaries
 
     def _make_item(
-        self, ids: List[int], boundaries: List[int]
+        self,
+        ids: List[int],
+        boundaries: List[int],
+        content_len: int = None,
     ) -> Dict[str, torch.Tensor]:
         L = self.seq_len
         position_ids = torch.zeros(L, dtype=torch.long)
@@ -117,9 +125,13 @@ class LongContextPackedDataset(IterableDataset):
             end = sorted_b[i + 1] if i + 1 < len(sorted_b) else L
             position_ids[start:end] = torch.arange(end - start, dtype=torch.long)
 
+        attention_mask = torch.ones(L, dtype=torch.long)
+        if content_len is not None and content_len < L:
+            attention_mask[content_len:] = 0
+
         return {
             "input_ids": torch.tensor(ids, dtype=torch.long),
-            "attention_mask": torch.ones(L, dtype=torch.long),
+            "attention_mask": attention_mask,
             "position_ids": position_ids,
         }
 

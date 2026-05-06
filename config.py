@@ -94,7 +94,11 @@ class Config:
     compile_base_model: bool = False  # opt-in; OK for dense too but not core to pilot
     qk_reconstruction: bool = True
     fp32_loss_math: bool = True
-    sequence_packing: bool = True
+    sequence_packing: bool = False  # off by default; packed examples need a
+                                    # block-causal mask which transformers'
+                                    # default forward doesn't build for us.
+                                    # Off = correct; on = faster but leaks
+                                    # attention across packed boundaries.
     num_workers: int = 4
     prefetch_factor: int = 4
 

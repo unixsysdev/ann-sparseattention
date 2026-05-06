@@ -16,9 +16,12 @@ Pilot on `Qwen/Qwen3-4B-Instruct-2507`, 2K training steps on WikiText-103,
 | **2000 (final)** | **50.9%** | **0.71%** |
 
 PPL gap is the primary signal: at <1% the model's output is preserved
-under ANN substitution. Recall plateaus around step 1000 because the
+under ANN substitution. Recall@K plateaus around step 1000 because the
 softmax-relevant keys are concentrated in the top ~30 — disagreement on
-positions 30-128 is on near-zero-weight tail that doesn't affect output.
+positions 30-128 is on the near-zero-weight tail and doesn't affect output.
+The repo also reports `mass@K` (sum of teacher attention probability captured
+by the search top-K), which is the more direct retrieval-quality metric
+when the softmax is sharp.
 
 **Pilot checkpoint** (step 2000): mirrored at
 [`datasysdev/ann-sparseattention`](https://huggingface.co/datasysdev/ann-sparseattention).
@@ -36,31 +39,36 @@ positions 30-128 is on near-zero-weight tail that doesn't affect output.
 | 256 | 31.6% | 9.88 | **−0.79%** |
 | 512 | 40.8% | 9.67 | **−2.89%** |
 
-**ANN-substituted attention at K ≥ 256 produces lower perplexity than full
-attention.** This is the well-documented "sparse attention denoises softmax"
-effect: full softmax is forced to spread small amounts of weight onto a
-long tail of irrelevant keys; truncating to top-K and renormalizing puts
-the weight where it actually belongs.
+In our eval, `K ≥ 256` produced **lower perplexity** than full attention
+(K=256: −0.79%, K=512: −2.89%). This is consistent with the sparse-attention
+denoising effect — full softmax spreads small amounts of weight over a long
+tail of irrelevant keys; truncating to top-K and renormalizing concentrates
+it where it matters. The contribution here is producing that denoised top-K
+**at sub-linear cost via off-the-shelf FAISS HNSW**, instead of computing
+all `O(L²)` scores first.
 
-The novelty here is *not* "ANN beats attention" — that denoising is a
-property of any hard top-K selection over softmax (cf. Top-k attention,
-Reformer's sparsity-quality observations). What's distinctive is that this
-method produces the denoised top-K **at sub-linear cost via off-the-shelf
-FAISS HNSW**, instead of computing all `O(L²)` scores and then taking top-K.
+### Compute / quality knobs (FLOP-counted)
 
-### Deployment knobs
+`L = 4096`. Compute reduction is the attention scoring step, `≈ L / K`.
+These are FLOP estimates, not measured wall-clock — the FAISS path in this
+repo is a research prototype that does CPU index builds and GPU↔CPU
+transfers, so it is not the right thing to time. A GPU-resident topk
+kernel is the natural next step.
 
-(`L = seq_len = 4096`. Compute reduction is the attention scoring step,
-≈ `L / K`.)
+| K | PPL gap | Attention scoring reduction |
+|---|---|---|
+| 512 | −2.89% | ~8× |
+| 256 | −0.79% | ~16× |
+| 128 | +0.82% | ~32× |
+| 64 | +2.42% | ~64× |
+| 32 | +4.51% | ~128× |
+| 16 | +7.51% | ~256× |
 
-| Use case | K | PPL gap | Attention compute reduction |
-|---|---|---|---|
-| Quality-improving | 256 | **−0.79%** | ~16× |
-| Quality-improving | 512 | **−2.89%** | ~8× |
-| Quality-preserving | 128 | +0.82% | ~32× |
-| Aggressive (speed-quality) | 64 | +2.42% | ~64× |
-| Speed-only | 32 | +4.51% | ~128× |
-| Speed-only | 16 | +7.51% | ~256× |
+Eval scope for the table above: 12 sequences × 4K tokens of WikiText-103
+validation (~50K tokens) on the pilot's 6-layer checkpoint. Numbers should
+be read as "what we observed on this slice", not population-level estimates;
+confidence intervals and downstream long-context tasks are the natural
+follow-up.
 
 ### Per-layer recall (pilot step 2000)
 
@@ -79,24 +87,43 @@ across K values, so it's a property of the layer, not noise. For the
 headline run this predicts the early-most trained layers (1–5) will
 underperform the rest; informative either way.
 
-### Note on recall numbers
+### Caveats / what's next
 
-The K-sweep recall (~26% at K=128) is about half of the in-training
-`evaluate()` recall (~51%) on the same checkpoint. The metric code path
-looks identical between the two; most likely cause is sampling different
-sequences from the streaming validation split (different `num_batches` and
-worker dispatch). The PPL gap is independent of which subset is sampled,
-so the deployment claim is unaffected; the absolute recall numbers between
-the two evals shouldn't be compared directly until the metric is reconciled.
+A few things the pilot does not yet establish, and that the next iteration
+will:
 
-### Headline run
+- **Packing**: the pilot's training and eval ran with sequence packing on,
+  without segment-level causal masks (transformers' default forward doesn't
+  build them). The relative PPL gap between full and ANN is internally
+  consistent under this confound, but the negative gap at K≥256 has at
+  least three candidate explanations we haven't yet disentangled —
+  (a) genuine sparse-softmax denoising, (b) ANN happening to filter
+  cross-document keys that full attention attends to, (c) sample noise on
+  ~50K eval tokens. The default config in this repo now has packing off so
+  the next run isolates (a) cleanly.
+- **Exact-topK oracle**: the obvious follow-up is a four-way Pareto —
+  full attention vs. exact top-K (true `QK^T` argmax-K, then attention) vs.
+  search-topK (our projections, exact distance) vs. search-ANN (FAISS HNSW).
+  That separates "denoising from any sparsity" from "denoising from learned
+  projections."
+- **Wall-clock**: the compute-reduction table above is FLOP-counted. The
+  FAISS path here is a research prototype (CPU index per forward, GPU↔CPU
+  transfer) and is the wrong thing to time. A GPU-resident topk kernel is
+  the next-step engineering.
+- **34-layer headline**: was queued and the VM was reclaimed before launch.
+  Config is wired (`make_headline_config()`); rerun is a single command on
+  any B200/H100/H200.
 
-A 34-layer headline (every layer except 0 and 35), 8K context, 6K steps,
+The recall@K and mass@K reported here come from a 12-batch eval slice, not
+a population-level estimate. Confidence intervals and downstream tasks
+(LongBench / RULER / needle-in-haystack) are the natural next evals.
+
+### Headline run (queued)
+
+34 layers (every layer except 0 and 35), 8K context, 6K steps,
 ~4-5h on a single B200. Tests whether the technique generalizes from a
-curated 6-layer subset to broad layer coverage.
-
-Checkpoints + headline results are mirrored at
-[https://huggingface.co/datasysdev/ann-sparseattention](https://huggingface.co/datasysdev/ann-sparseattention).
+6-layer subset to broad layer coverage. Checkpoints will be mirrored at
+[`datasysdev/ann-sparseattention`](https://huggingface.co/datasysdev/ann-sparseattention).
 
 ## How it works
 
@@ -133,10 +160,12 @@ config.py        Run config (pilot defaults; make_headline_config() for follow-u
 model.py         SearchProjection, FrozenForwardCapture (with QK reconstruction
                  trick: capture (Q, K) post-RoPE while the forward stays in FA),
                  contrastive + KL distillation losses
-data.py          Long-context packed dataloader (sequence packing,
-                 pin_memory, prefetch)
-inference.py     ANN-substituted attention forward (FAISS HNSW or exact top-K)
-eval.py          Recall@K curve, full-vs-ANN PPL, MoE router stability
+data.py          Long-context dataloader (packing off by default to avoid
+                 cross-segment attention leakage; pin_memory, prefetch)
+inference.py     ANN-substituted attention (exact top-K for analysis;
+                 CPU-FAISS HNSW prototype path — not a deployable kernel)
+eval.py          recall@K curve, mass@K curve, full-vs-ANN PPL,
+                 MoE router stability
 train.py         Training loop, Liger setup, FA-3→FA-2→SDPA→eager fallback,
                  base-model freeze + drift check, auto-resume from latest ckpt
 tests/           QK reconstruction verification + 50-step smoke test

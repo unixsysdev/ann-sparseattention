@@ -484,10 +484,13 @@ def train(config: Config):
             attention_mask = batch.get("attention_mask")
             if attention_mask is not None:
                 attention_mask = attention_mask.to(base_model.device)
+            position_ids = batch.get("position_ids")
+            if position_ids is not None:
+                position_ids = position_ids.to(base_model.device)
 
             try:
                 hidden_states_dict, attn_weights_dict = capture.run(
-                    input_ids, attention_mask
+                    input_ids, attention_mask, position_ids=position_ids
                 )
             except Exception as e:
                 print(f"[step {step}] Forward capture failed: {e}")

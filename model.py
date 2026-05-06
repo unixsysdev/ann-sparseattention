@@ -283,6 +283,7 @@ class FrozenForwardCapture:
         self,
         input_ids: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.Tensor] = None,
     ) -> Tuple[Dict[int, torch.Tensor], Dict[int, torch.Tensor]]:
         """
         Run the frozen forward, return:
@@ -308,6 +309,8 @@ class FrozenForwardCapture:
                     output_hidden_states=False,
                     use_cache=False,
                 )
+                if position_ids is not None:
+                    kwargs["position_ids"] = position_ids
                 if not self.qk_reconstruction:
                     kwargs["output_attentions"] = True
                 if self.capture_router:
