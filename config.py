@@ -108,18 +108,29 @@ class Config:
 
 def make_headline_config() -> Config:
     """
-    Headline run after the pilot succeeds. Bumps seq_len to 8K, 8K total
-    steps. 9 well-distributed layers (every 4th, layers 2..34) — fewer
-    layers but trained more thoroughly is a stronger signal than 17 layers
-    superficially trained.
+    Headline run after the pilot succeeds. Trains every attention layer
+    except the first (layer 0, sees raw token embeddings before context is
+    mixed) and the last (layer 35, directly produces output logits — errors
+    are unrecoverable). 34 of 36 layers = 11.1M trainable params.
+
+    Why "all but 2" instead of a curated subset: the deployment-relevant
+    claim is "we made attention sub-linear on a real model," which requires
+    showing the technique works on essentially every layer, not just the
+    easy ones a curated subset might be hiding behind.
+
+    Step-time budget at 8K context, batch 8: ~1.5-2.5s/step. If it's slower
+    than that, options: drop K_pos 16->8, sample contrastive negatives, or
+    raise batch size if memory allows.
     """
     cfg = Config()
     cfg.seq_len = 8192
     cfg.total_steps = 8000
     cfg.warmup_steps = 400
     cfg.eval_every = 1000
-    cfg.save_every = 2000
-    cfg.full_attention_layer_indices = [2, 6, 10, 14, 18, 22, 26, 30, 34]
+    cfg.save_every = 500          # 11M params * float32 = ~44 MB; cheap
+    cfg.keep_last_n_checkpoints = 8
+    cfg.full_attention_layer_indices = list(range(36))
+    cfg.reserved_full_attention_indices = [0, 35]
     cfg.eval_num_batches = 32
-    cfg.wandb_run_name = "headline-8k-9layers"
+    cfg.wandb_run_name = "headline-8k-34layers"
     return cfg
