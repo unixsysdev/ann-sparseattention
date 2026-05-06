@@ -5,6 +5,33 @@ attention's top-K preferences in a low-dimensional space, so we can swap dense
 quadratic attention for an off-the-shelf ANN index (FAISS HNSW) at inference
 and lose almost no model quality.
 
+## Current status
+
+Research prototype. The trained projections work, but the runtime and the
+evaluation envelope are both narrow. Treat reported numbers as preliminary.
+
+**What's validated:**
+- 6-layer pilot on Qwen3-4B-Instruct-2507 (2K steps, ~25 min on a B200).
+- WikiText-103 PPL is preserved under ANN-substituted attention at K=128
+  (gap ≈ +0.7%) on a 12-batch eval slice.
+- Learned 64-d search projections retrieve attention-relevant keys: at
+  K=128 we capture meaningful teacher attention mass; the K curve is
+  monotonic and well-behaved.
+
+**Not yet validated (next iteration):**
+- 34-layer / whole-model substitution.
+- Long-context task quality (LongBench, RULER, needle-in-haystack).
+- Wall-clock speedup vs. FlashAttention/SDPA — not measured.
+- KV-cache decode-mode integration.
+- GPU-resident ANN or fused gather-attention kernel.
+
+**Runtime caveat.** The current FAISS path is a correctness prototype: it
+builds a CPU index per forward pass and uses dense-style tensor expansion
+internally for the gather step. The compute-reduction numbers below are
+**algorithmic scoring reductions, not measured wall-clock speedups.** A
+production runtime requires a GPU-resident topk kernel or integration with
+paged/block-sparse attention kernels.
+
 Pilot on `Qwen/Qwen3-4B-Instruct-2507`, 2K training steps on WikiText-103,
 6 trained layers, 2M trainable parameters:
 
@@ -39,13 +66,18 @@ when the softmax is sharp.
 | 256 | 31.6% | 9.88 | **−0.79%** |
 | 512 | 40.8% | 9.67 | **−2.89%** |
 
-In our eval, `K ≥ 256` produced **lower perplexity** than full attention
-(K=256: −0.79%, K=512: −2.89%). This is consistent with the sparse-attention
-denoising effect — full softmax spreads small amounts of weight over a long
-tail of irrelevant keys; truncating to top-K and renormalizing concentrates
-it where it matters. The contribution here is producing that denoised top-K
-**at sub-linear cost via off-the-shelf FAISS HNSW**, instead of computing
-all `O(L²)` scores first.
+On this small WikiText slice, `K ≥ 256` produced lower measured PPL than
+the full-attention reference (K=256: −0.79%, K=512: −2.89%). A plausible
+explanation is sparse-attention denoising — full softmax spreads small
+amounts of weight over a long tail of low-relevance keys, top-K
+renormalization concentrates it. But with 12 eval batches, sample noise,
+packed-boundary artifacts (the pilot trained with packing on; default in
+the repo is now off), and partial-layer substitution acting like
+regularization are all candidate explanations we haven't yet ruled out.
+We're treating it as a hypothesis worth confirming rather than the
+explanation. The follow-up — exact-topK oracle vs. ANN-topK at the same K
+— separates "denoising from any sparsity" from "denoising from learned
+projections."
 
 ### Compute / quality knobs (FLOP-counted)
 

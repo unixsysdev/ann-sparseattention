@@ -69,6 +69,19 @@ def _exact_topk_search(
     return sim.topk(K_eff, dim=-1).indices  # [B, L, K_eff]
 
 
+# Diagnostics for the FAISS path. Every call appends a dict to FAISS_STATS;
+# callers reset and aggregate as they wish:
+#   self_pad_rate: fraction of (b, q, k) slots filled with the query position
+#     itself because FAISS over-fetch + causal filter left < K real causal
+#     hits (high for early queries q < K).
+#   causal_fill_rate: fraction of slots filled with a strictly-prior position
+#     (retrieved < q) — the actual useful retrieval signal.
+#   self_attn_rate: fraction at retrieved == q legitimately returned by FAISS.
+# If self_pad_rate is non-trivial, K-sweep numbers are partially driven by
+# self-padding rather than learned retrieval.
+FAISS_STATS: list = []
+
+
 def _faiss_topk_search(
     q_search: torch.Tensor,
     k_search: torch.Tensor,
@@ -100,6 +113,14 @@ def _faiss_topk_search(
     B, L, d = q_search.shape
     K_eff = min(K, L)
     out = torch.empty(B, L, K_eff, dtype=torch.long, device=q_search.device)
+
+    # Diagnostic counters: how many slots got self-padded vs. filled with a
+    # strictly-prior causal neighbor.
+    n_self_pad = 0          # padded with q (FAISS returned fewer than K causal hits)
+    n_strict_prior = 0      # retrieved index < q
+    n_at_self = 0           # retrieved index == q (legitimate self-attention)
+    n_total = 0
+
     for b in range(B):
         kb = k_search[b].detach().float().cpu().numpy()
         qb = q_search[b].detach().float().cpu().numpy()
@@ -125,16 +146,30 @@ def _faiss_topk_search(
         for q in range(L):
             row = ids_t[q]
             row = row[row >= 0][: K_eff]
-            if row.numel() < K_eff:
-                # Pad with self-position to keep tensor shape regular.
+            n_real = int(row.numel())
+            if n_real < K_eff:
                 pad = torch.full(
-                    (K_eff - row.numel(),),
+                    (K_eff - n_real,),
                     int(q),
                     device=q_search.device,
                     dtype=torch.long,
                 )
                 row = torch.cat([row, pad])
+                n_self_pad += K_eff - n_real
+            real = row[:n_real]
+            n_strict_prior += int((real < q).sum().item())
+            n_at_self += int((real == q).sum().item())
+            n_total += K_eff
             out[b, q, : K_eff] = row[: K_eff]
+
+    FAISS_STATS.append(
+        {
+            "self_pad_rate": n_self_pad / max(1, n_total),
+            "causal_fill_rate": n_strict_prior / max(1, n_total),
+            "self_attn_rate": n_at_self / max(1, n_total),
+            "B": B, "L": L, "K": K_eff,
+        }
+    )
     return out
 
 

@@ -105,28 +105,49 @@ def _per_position_recall(
 
 
 def compute_perplexity(
-    model, input_ids: torch.Tensor, attention_mask: torch.Tensor = None
+    model,
+    input_ids: torch.Tensor,
+    attention_mask: torch.Tensor = None,
+    position_ids: torch.Tensor = None,
 ) -> float:
-    """Standard NLL averaged over tokens, exp() at the end."""
+    """
+    Standard NLL averaged over tokens, exp() at the end.
+
+    Loss is averaged only over positions where attention_mask == 1 in the
+    *target* (i.e. shifted) range. This way padded positions don't get
+    counted in PPL even when the model still produces logits there.
+    """
     with torch.no_grad():
-        out = model(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            use_cache=False,
-        )
+        kwargs = dict(input_ids=input_ids, use_cache=False)
+        if attention_mask is not None:
+            kwargs["attention_mask"] = attention_mask
+        if position_ids is not None:
+            kwargs["position_ids"] = position_ids
+        out = model(**kwargs)
         logits = out.logits  # [B, L, V]
+
     shift_logits = logits[..., :-1, :].contiguous()
     shift_labels = input_ids[..., 1:].contiguous()
-    loss = F.cross_entropy(
-        shift_logits.view(-1, shift_logits.size(-1)).float(),
-        shift_labels.view(-1),
-        reduction="mean",
-    )
+    flat_logits = shift_logits.view(-1, shift_logits.size(-1)).float()
+    flat_labels = shift_labels.view(-1)
+
+    if attention_mask is not None:
+        # Only count tokens whose target position was real (mask==1).
+        target_mask = attention_mask[..., 1:].contiguous().view(-1).bool()
+        flat_logits = flat_logits[target_mask]
+        flat_labels = flat_labels[target_mask]
+
+    loss = F.cross_entropy(flat_logits, flat_labels, reduction="mean")
     return float(torch.exp(loss).item())
 
 
-def compute_perplexity_full_attention(base_model, input_ids: torch.Tensor) -> float:
-    return compute_perplexity(base_model, input_ids)
+def compute_perplexity_full_attention(
+    base_model,
+    input_ids: torch.Tensor,
+    attention_mask: torch.Tensor = None,
+    position_ids: torch.Tensor = None,
+) -> float:
+    return compute_perplexity(base_model, input_ids, attention_mask, position_ids)
 
 
 def compute_perplexity_ann_substituted(
@@ -134,6 +155,8 @@ def compute_perplexity_ann_substituted(
     search_module,
     input_ids: torch.Tensor,
     config,
+    attention_mask: torch.Tensor = None,
+    position_ids: torch.Tensor = None,
     return_router_stability: bool = False,
 ) -> Tuple[float, float]:
     """
@@ -148,20 +171,22 @@ def compute_perplexity_ann_substituted(
     ]
 
     fwd_kwargs = dict(input_ids=input_ids, use_cache=False)
+    if attention_mask is not None:
+        fwd_kwargs["attention_mask"] = attention_mask
+    if position_ids is not None:
+        fwd_kwargs["position_ids"] = position_ids
     if return_router_stability:
         fwd_kwargs["output_router_logits"] = True
 
     with torch.no_grad():
         full_out = base_model(**fwd_kwargs)
-    ppl_full = float(
-        torch.exp(
-            F.cross_entropy(
-                full_out.logits[..., :-1, :].contiguous().view(-1, full_out.logits.size(-1)).float(),
-                input_ids[..., 1:].contiguous().view(-1),
-                reduction="mean",
-            )
-        )
-    )
+    full_logits = full_out.logits[..., :-1, :].contiguous().view(-1, full_out.logits.size(-1)).float()
+    full_labels = input_ids[..., 1:].contiguous().view(-1)
+    if attention_mask is not None:
+        target_mask = attention_mask[..., 1:].contiguous().view(-1).bool()
+        full_logits = full_logits[target_mask]
+        full_labels = full_labels[target_mask]
+    ppl_full = float(torch.exp(F.cross_entropy(full_logits, full_labels, reduction="mean")))
 
     wrappers = install_ann_attention(
         base_model,
@@ -180,15 +205,13 @@ def compute_perplexity_ann_substituted(
     finally:
         uninstall_ann_attention(wrappers)
 
-    ppl_ann = float(
-        torch.exp(
-            F.cross_entropy(
-                ann_out.logits[..., :-1, :].contiguous().view(-1, ann_out.logits.size(-1)).float(),
-                input_ids[..., 1:].contiguous().view(-1),
-                reduction="mean",
-            )
-        )
-    )
+    ann_logits = ann_out.logits[..., :-1, :].contiguous().view(-1, ann_out.logits.size(-1)).float()
+    ann_labels = input_ids[..., 1:].contiguous().view(-1)
+    if attention_mask is not None:
+        target_mask = attention_mask[..., 1:].contiguous().view(-1).bool()
+        ann_logits = ann_logits[target_mask]
+        ann_labels = ann_labels[target_mask]
+    ppl_ann = float(torch.exp(F.cross_entropy(ann_logits, ann_labels, reduction="mean")))
 
     # NOTE: we return ppl_ann separately (not gap), and pair it with the
     # already-computed ppl_full at the call site.
@@ -254,9 +277,17 @@ def evaluate(base_model, search_module, capture, config, tokenizer) -> Dict:
     with torch.no_grad():
         for batch in eval_data:
             input_ids = batch["input_ids"].to(base_model.device)
+            attention_mask = batch.get("attention_mask")
+            if attention_mask is not None:
+                attention_mask = attention_mask.to(base_model.device)
+            position_ids = batch.get("position_ids")
+            if position_ids is not None:
+                position_ids = position_ids.to(base_model.device)
 
             # --- recall@K via captured teacher attention ---
-            hidden_states_dict, attn_weights_dict = capture.run(input_ids)
+            hidden_states_dict, attn_weights_dict = capture.run(
+                input_ids, attention_mask=attention_mask, position_ids=position_ids
+            )
             q_dict, k_dict = search_module(hidden_states_dict)
 
             for layer_idx in layers_to_train:
@@ -284,12 +315,16 @@ def evaluate(base_model, search_module, capture, config, tokenizer) -> Dict:
                     mass_acc[layer_idx][K].extend(mass_vals.tolist())
 
             # --- end-to-end ppl + router stability ---
-            ppl_full = compute_perplexity_full_attention(base_model, input_ids)
+            ppl_full = compute_perplexity_full_attention(
+                base_model, input_ids, attention_mask, position_ids
+            )
             ppl_ann, router_match = compute_perplexity_ann_substituted(
                 base_model,
                 search_module,
                 input_ids,
                 config,
+                attention_mask=attention_mask,
+                position_ids=position_ids,
                 return_router_stability=config.verify_routing_stability,
             )
             full_ppls.append(ppl_full)

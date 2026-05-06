@@ -28,6 +28,7 @@ from eval import (  # noqa: E402
     _per_position_recall,
     compute_perplexity,
 )
+import inference  # noqa: E402
 from inference import install_ann_attention, uninstall_ann_attention  # noqa: E402
 from model import (  # noqa: E402
     FrozenForwardCapture,
@@ -75,20 +76,33 @@ def k_sweep(ckpt_path: str, K_values=(16, 32, 64, 128, 256, 512), num_batches: i
     eval_data = list(build_eval_data(tokenizer, cfg, num_batches=num_batches))
 
     # Precompute teacher attention + search outputs once per batch.
+    # Cache attention_mask + position_ids alongside the activations so every
+    # downstream call (recall, mass@K, full PPL, ANN PPL) sees the same
+    # mask/positions and PPL is comparable across K.
     print("Pre-running teacher captures...")
     cached: list = []
     for batch in eval_data:
         input_ids = batch["input_ids"].to(base_model.device)
-        h_dict, w_dict = capture.run(input_ids)
+        attention_mask = batch.get("attention_mask")
+        if attention_mask is not None:
+            attention_mask = attention_mask.to(base_model.device)
+        position_ids = batch.get("position_ids")
+        if position_ids is not None:
+            position_ids = position_ids.to(base_model.device)
+        h_dict, w_dict = capture.run(
+            input_ids, attention_mask=attention_mask, position_ids=position_ids
+        )
         with torch.no_grad():
             q_dict, k_dict = search(h_dict)
-        cached.append((input_ids, h_dict, w_dict, q_dict, k_dict))
+        cached.append(
+            (input_ids, attention_mask, position_ids, h_dict, w_dict, q_dict, k_dict)
+        )
 
     # Reference full-attention PPL (computed once, not per K).
     print("Computing full-attention PPL...")
     full_ppls = []
-    for input_ids, *_ in cached:
-        full_ppls.append(compute_perplexity(base_model, input_ids))
+    for input_ids, attn_m, pos_ids, *_ in cached:
+        full_ppls.append(compute_perplexity(base_model, input_ids, attn_m, pos_ids))
     ppl_full = sum(full_ppls) / len(full_ppls)
     print(f"  ppl_full = {ppl_full:.4f}")
 
@@ -99,7 +113,7 @@ def k_sweep(ckpt_path: str, K_values=(16, 32, 64, 128, 256, 512), num_batches: i
         # Recall@K + mass@K (using cached captures)
         per_layer_recall = {idx: [] for idx in layers_to_train}
         per_layer_mass = {idx: [] for idx in layers_to_train}
-        for input_ids, h_dict, w_dict, q_dict, k_dict in cached:
+        for input_ids, attn_m, pos_ids, h_dict, w_dict, q_dict, k_dict in cached:
             for idx in layers_to_train:
                 teacher_full = w_dict[idx]   # [B, H, L, L]
                 teacher = aggregate_heads(
@@ -140,11 +154,27 @@ def k_sweep(ckpt_path: str, K_values=(16, 32, 64, 128, 256, 512), num_batches: i
             hnsw_ef_search=cfg.faiss_hnsw_ef_search,
         )
         try:
-            ann_ppls = [compute_perplexity(base_model, ids) for ids, *_ in cached]
+            inference.FAISS_STATS.clear()
+            ann_ppls = [
+                compute_perplexity(base_model, ids, attn_m, pos_ids)
+                for ids, attn_m, pos_ids, *_ in cached
+            ]
         finally:
             uninstall_ann_attention(wrappers)
         ppl_ann = sum(ann_ppls) / len(ann_ppls)
         ppl_gap = (ppl_ann - ppl_full) / ppl_full
+
+        # Aggregate FAISS retrieval-quality stats over all calls (one per
+        # trained layer per forward batch).
+        if inference.FAISS_STATS:
+            n = len(inference.FAISS_STATS)
+            faiss_diag = {
+                "self_pad_rate": sum(s["self_pad_rate"] for s in inference.FAISS_STATS) / n,
+                "causal_fill_rate": sum(s["causal_fill_rate"] for s in inference.FAISS_STATS) / n,
+                "self_attn_rate": sum(s["self_attn_rate"] for s in inference.FAISS_STATS) / n,
+            }
+        else:
+            faiss_diag = {}
 
         results["by_K"][K] = {
             "recall_avg": recall_avg,
@@ -153,12 +183,19 @@ def k_sweep(ckpt_path: str, K_values=(16, 32, 64, 128, 256, 512), num_batches: i
             "mass_per_layer": mass_per_layer,
             "ppl_ann": ppl_ann,
             "ppl_gap_relative": ppl_gap,
+            "faiss_diag": faiss_diag,
         }
         print(
             f"  mass_avg   = {mass_avg:.4f}   "
             f"recall_avg = {recall_avg:.4f}   "
             f"ppl_ann = {ppl_ann:.4f}   ppl_gap = {ppl_gap:+.3%}"
         )
+        if faiss_diag:
+            print(
+                f"  [faiss] self_pad={faiss_diag['self_pad_rate']:.3f}  "
+                f"causal_fill={faiss_diag['causal_fill_rate']:.3f}  "
+                f"self_attn={faiss_diag['self_attn_rate']:.3f}"
+            )
 
     out_path = os.path.splitext(ckpt_path)[0] + ".k_sweep.json"
     with open(out_path, "w") as f:
