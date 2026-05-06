@@ -1,0 +1,12 @@
+torch>=2.4.0
+transformers>=4.45.0
+accelerate>=0.34.0
+datasets>=2.20.0
+wandb>=0.18.0
+
+# Perf — see read_and_take_notice_before_code.md
+liger-kernel>=0.4.0
+flash-attn>=2.7.0           # FA-2 (Hopper); upgrades to FA-3 path on B200/H200
+
+# Optional: FAISS-backed ANN at scale (exact torch.topk used as default)
+# faiss-gpu>=1.8.0

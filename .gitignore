@@ -1,0 +1,25 @@
+# Spec/working docs — kept out of public repo per request
+project.md
+read_and_take_notice_before_code.md
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# Local dev
+.claude/
+.env
+*.log
+env.sh
+
+# Training artefacts (kept out of repo; pushed to HF)
+checkpoints/
+wandb/
+hf-cache/
+
+# Editor
+.vscode/
+.idea/
+*.swp
