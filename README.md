@@ -38,13 +38,29 @@ positions 30-128 is on near-zero-weight tail that doesn't affect output.
 
 **ANN-substituted attention at K ≥ 256 produces lower perplexity than full
 attention.** This is the well-documented "sparse attention denoises softmax"
-effect — full softmax is forced to spread small amounts of weight onto a
+effect: full softmax is forced to spread small amounts of weight onto a
 long tail of irrelevant keys; truncating to top-K and renormalizing puts
-that weight where it actually belongs. The trend is monotonic and smooth,
-which makes a methodological bug unlikely.
+the weight where it actually belongs.
 
-Deployment knobs from this curve: K=64 buys ~16× attention speedup at 2.4%
-PPL cost; K=128 buys ~8× at <1%; K=256 buys ~4× and *improves* PPL.
+The novelty here is *not* "ANN beats attention" — that denoising is a
+property of any hard top-K selection over softmax (cf. Top-k attention,
+Reformer's sparsity-quality observations). What's distinctive is that this
+method produces the denoised top-K **at sub-linear cost via off-the-shelf
+FAISS HNSW**, instead of computing all `O(L²)` scores and then taking top-K.
+
+### Deployment knobs
+
+(`L = seq_len = 4096`. Compute reduction is the attention scoring step,
+≈ `L / K`.)
+
+| Use case | K | PPL gap | Attention compute reduction |
+|---|---|---|---|
+| Quality-improving | 256 | **−0.79%** | ~16× |
+| Quality-improving | 512 | **−2.89%** | ~8× |
+| Quality-preserving | 128 | +0.82% | ~32× |
+| Aggressive (speed-quality) | 64 | +2.42% | ~64× |
+| Speed-only | 32 | +4.51% | ~128× |
+| Speed-only | 16 | +7.51% | ~256× |
 
 ### Per-layer recall (pilot step 2000)
 
