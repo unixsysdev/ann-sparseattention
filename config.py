@@ -253,6 +253,7 @@ def make_all36_d128_block_config() -> Config:
     cfg.keep_last_n_checkpoints = 10
     cfg.eval_num_batches = 8
     cfg.log_every = 25
+    cfg.compile_search_module = False
     cfg.wandb_run_name = "all36-d128-block-causal"
     cfg.checkpoint_dir = "/tmp/checkpoints_all36_d128_block"
     return cfg
