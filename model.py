@@ -411,6 +411,7 @@ def contrastive_loss_layer(
     K_pos: int = 16,
     tau: float = 0.07,
     fp32: bool = True,
+    query_mask: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, Dict[str, float]]:
     """
     InfoNCE with teacher-derived positives.
@@ -448,9 +449,12 @@ def contrastive_loss_layer(
     log_num = torch.logsumexp(pos_scores, dim=-1)   # [B, L]
     log_denom = torch.logsumexp(sim_masked, dim=-1)  # [B, L]
 
-    # Skip queries that have no valid context (position 0 has only itself; we
-    # don't get useful contrastive signal there).
+    # Skip queries that have no valid context (position 0 has only itself).
+    # Also skip pad query positions if a mask is supplied — pad queries train
+    # the projections on noise.
     query_valid = torch.arange(L, device=device).unsqueeze(0).expand(B, L) > 0
+    if query_mask is not None:
+        query_valid = query_valid & query_mask.bool()
 
     loss_per_token = -(log_num - log_denom)
     loss = loss_per_token.masked_select(query_valid).mean()
@@ -472,6 +476,7 @@ def distillation_loss_layer(
     teacher_attn: torch.Tensor,
     tau: float = 1.0,
     fp32: bool = True,
+    query_mask: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, Dict[str, float]]:
     """
     KL(teacher || student) over attention distributions.
@@ -499,6 +504,8 @@ def distillation_loss_layer(
     kl_per_token = (teacher_dist * (teacher_log - student_log_dist)).sum(-1)
 
     query_valid = torch.arange(L, device=device).unsqueeze(0).expand(B, L) > 0
+    if query_mask is not None:
+        query_valid = query_valid & query_mask.bool()
     loss = kl_per_token.masked_select(query_valid).mean()
 
     return loss, {}
@@ -509,8 +516,13 @@ def total_loss(
     k_search_dict: Dict[int, torch.Tensor],
     teacher_attn_dict: Dict[int, torch.Tensor],
     config,
+    attention_mask: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, Dict]:
-    """Sum losses across layers, return total + per-layer diagnostics."""
+    """Sum losses across layers, return total + per-layer diagnostics.
+
+    `attention_mask` (`[B, L]`, 1 = real token, 0 = pad) filters out pad
+    query positions so they don't contribute training noise.
+    """
     layer_losses = {"contrastive": [], "distillation": [], "diag": {}}
 
     for layer_idx in q_search_dict:
@@ -525,6 +537,7 @@ def total_loss(
             K_pos=config.K_pos,
             tau=config.tau_contrastive,
             fp32=config.fp32_loss_math,
+            query_mask=attention_mask,
         )
         L_distill, _ = distillation_loss_layer(
             q_search_dict[layer_idx],
@@ -532,6 +545,7 @@ def total_loss(
             teacher,
             tau=config.tau_distillation,
             fp32=config.fp32_loss_math,
+            query_mask=attention_mask,
         )
 
         layer_losses["contrastive"].append(L_cont)

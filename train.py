@@ -509,7 +509,10 @@ def train(config: Config):
                 continue
 
             q_dict, k_dict = search_module(hidden_states_dict)
-            loss, log_dict = total_loss(q_dict, k_dict, attn_weights_dict, config)
+            loss, log_dict = total_loss(
+                q_dict, k_dict, attn_weights_dict, config,
+                attention_mask=attention_mask,
+            )
 
             loss = loss / config.gradient_accumulation_steps
             loss.backward()

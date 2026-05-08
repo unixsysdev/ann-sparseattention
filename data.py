@@ -32,7 +32,7 @@ class LongContextPackedDataset(IterableDataset):
         seq_len: int,
         text_field: str = "text",
         split: str = "train",
-        streaming: bool = True,
+        streaming: bool = False,
         pack: bool = True,
         eos_between: bool = True,
         dataset_config: str = None,

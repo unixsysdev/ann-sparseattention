@@ -46,12 +46,21 @@ from model import (  # noqa: E402
 )
 
 
-def _causal_topk(q: torch.Tensor, k: torch.Tensor, K: int) -> torch.Tensor:
-    """q, k: [B, L, d]. Returns top-K indices [B, L, K], causal-respecting."""
+def _causal_topk(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    K: int,
+    key_mask: torch.Tensor = None,
+) -> torch.Tensor:
+    """q, k: [B, L, d]. Returns top-K indices [B, L, K], causal-respecting.
+    If key_mask is provided ([B, L], 1=real, 0=pad), pad keys are excluded.
+    """
     B, L, _ = q.shape
     sim = torch.bmm(q, k.transpose(1, 2))
     mask = torch.ones(L, L, device=sim.device, dtype=torch.bool).tril()
     sim = sim.masked_fill(~mask, -1e9)
+    if key_mask is not None:
+        sim = sim.masked_fill(~key_mask.unsqueeze(1).bool(), -1e9)
     return sim.topk(min(K, L), dim=-1).indices
 
 
@@ -59,12 +68,12 @@ def _mass_against_per_head_teacher(
     teacher_full: torch.Tensor,    # [B, H, L, L] — full per-head softmax
     retrieved: torch.Tensor,        # [B, L, K]
     K: int,
+    query_mask: torch.Tensor = None,  # [B, L], 1 = real, 0 = pad
 ) -> torch.Tensor:
     """
-    For each (b, h, q) with q >= K, return the fraction of teacher attention
-    mass that the retrieval captured. The K floor is to avoid the early
-    positions where the causal window is smaller than K and the comparison
-    is degenerate. Returns: scalar mean.
+    For each (b, h, q) with q >= K and q a real (non-pad) token, return the
+    fraction of teacher attention mass that the retrieval captured. Returns
+    scalar mean.
     """
     B, H, L, _ = teacher_full.shape
     device = teacher_full.device
@@ -74,6 +83,10 @@ def _mass_against_per_head_teacher(
     mass = (teacher_full * grid.to(teacher_full.dtype)).sum(-1)  # [B, H, L]
     pos = torch.arange(L, device=device).view(1, 1, L)
     keep = (pos >= K).expand(B, H, L)
+    if query_mask is not None:
+        keep = keep & query_mask.unsqueeze(1).bool().expand(B, H, L)
+    if keep.sum() == 0:
+        return float("nan")
     return mass.masked_select(keep).mean().item()
 
 
@@ -152,21 +165,29 @@ def main():
             k_agg = k_raw.float().mean(dim=1)
             q_agg = F.normalize(q_agg, dim=-1)
             k_agg = F.normalize(k_agg, dim=-1)
-            raw_topk_full = _causal_topk(q_agg, k_agg, K_max)  # [B, L, K_max]
+            raw_topk_full = _causal_topk(
+                q_agg, k_agg, K_max, key_mask=attention_mask
+            )
 
             # --- Learned Q_s / K_s (already a single shared vector per token) ---
             q_s = F.normalize(q_s_dict[layer].float(), dim=-1)
             k_s = F.normalize(k_s_dict[layer].float(), dim=-1)
-            learned_topk_full = _causal_topk(q_s, k_s, K_max)
+            learned_topk_full = _causal_topk(
+                q_s, k_s, K_max, key_mask=attention_mask
+            )
 
             for K in K_values:
                 raw_topk_K = raw_topk_full[..., :K]
                 learned_topk_K = learned_topk_full[..., :K]
                 acc[K]["raw_qk"][layer].append(
-                    _mass_against_per_head_teacher(teacher_full, raw_topk_K, K)
+                    _mass_against_per_head_teacher(
+                        teacher_full, raw_topk_K, K, query_mask=attention_mask
+                    )
                 )
                 acc[K]["learned"][layer].append(
-                    _mass_against_per_head_teacher(teacher_full, learned_topk_K, K)
+                    _mass_against_per_head_teacher(
+                        teacher_full, learned_topk_K, K, query_mask=attention_mask
+                    )
                 )
 
         if bi % 3 == 0:

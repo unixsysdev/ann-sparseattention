@@ -52,9 +52,12 @@ def _exact_topk_search(
     k_search: torch.Tensor,
     K: int,
     causal: bool = True,
+    key_mask: torch.Tensor = None,
 ) -> torch.Tensor:
     """
     q_search, k_search: [B, L, d_search].
+    key_mask: optional [B, L] (1 = real token, 0 = pad) — pad keys are
+    excluded from retrieval candidates.
     Returns indices [B, L, K] of top-K keys by cosine similarity of search
     vectors, restricted to causal (key index <= query index).
     """
@@ -65,6 +68,9 @@ def _exact_topk_search(
     if causal:
         mask = torch.ones(L, L, device=sim.device, dtype=torch.bool).tril()
         sim = sim.masked_fill(~mask, -1e9)
+    if key_mask is not None:
+        # Block pad keys for every query.
+        sim = sim.masked_fill(~key_mask.unsqueeze(1).bool(), -1e9)
     K_eff = min(K, L)
     return sim.topk(K_eff, dim=-1).indices  # [B, L, K_eff]
 
@@ -91,6 +97,7 @@ def _faiss_topk_search(
     hnsw_M: int = 32,
     hnsw_ef_construction: int = 40,
     hnsw_ef_search: int = 64,
+    key_mask: torch.Tensor = None,
 ) -> torch.Tensor:
     """
     FAISS-backed approximate top-K.
@@ -121,6 +128,12 @@ def _faiss_topk_search(
     n_at_self = 0           # retrieved index == q (legitimate self-attention)
     n_total = 0
 
+    # Per-batch pad mask in CPU bool form for cheap filtering inside the loop.
+    if key_mask is not None:
+        pad_b = (~key_mask.bool()).cpu()  # True at pad
+    else:
+        pad_b = None
+
     for b in range(B):
         kb = k_search[b].detach().float().cpu().numpy()
         qb = q_search[b].detach().float().cpu().numpy()
@@ -142,6 +155,11 @@ def _faiss_topk_search(
         ids_t = torch.from_numpy(ids).to(q_search.device)  # [L, over]
         q_pos = torch.arange(L, device=q_search.device).unsqueeze(-1)
         valid = ids_t <= q_pos
+        if pad_b is not None:
+            # Drop retrieved positions that point at pad keys.
+            pad_b_dev = pad_b[b].to(q_search.device)         # [L]
+            is_pad_key = pad_b_dev[ids_t.clamp(min=0)]       # [L, over]
+            valid = valid & ~is_pad_key
         ids_t = ids_t.masked_fill(~valid, -1)
         for q in range(L):
             row = ids_t[q]
@@ -291,6 +309,11 @@ class ANNAttentionWrapper:
                 cos, sin = pos_emb
                 q, k = _apply_rotary(q, k, cos, sin)
 
+            # Pull the model's attention_mask from kwargs so retrieval can
+            # exclude pad key positions. Without this the ANN top-K may
+            # include pad keys, giving the model garbage to attend to.
+            key_mask = kwargs.get("attention_mask", None)
+
             with torch.no_grad():
                 q_search, k_search = wrapper.search_projection(hidden_states)
                 if wrapper.use_faiss:
@@ -302,10 +325,12 @@ class ANNAttentionWrapper:
                         hnsw_M=wrapper.hnsw_M,
                         hnsw_ef_construction=wrapper.hnsw_ef_construction,
                         hnsw_ef_search=wrapper.hnsw_ef_search,
+                        key_mask=key_mask,
                     )
                 else:
                     retrieved = _exact_topk_search(
-                        q_search, k_search, wrapper.K_retrieve
+                        q_search, k_search, wrapper.K_retrieve,
+                        key_mask=key_mask,
                     )
 
             attn_out = _ann_attention(q, k, v, retrieved)  # [B, H, L, d_head]
