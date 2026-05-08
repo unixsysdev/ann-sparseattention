@@ -213,7 +213,8 @@ def k_sweep(
                 f"self_attn={faiss_diag['self_attn_rate']:.3f}"
             )
 
-    out_path = os.path.splitext(ckpt_path)[0] + ".k_sweep.json"
+    suffix = "faiss" if use_faiss else "exact"
+    out_path = os.path.splitext(ckpt_path)[0] + f".k_sweep_{suffix}.json"
     with open(out_path, "w") as f:
         json.dump(results, f, indent=2)
     print(f"\nWrote {out_path}")

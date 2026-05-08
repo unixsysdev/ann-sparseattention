@@ -80,31 +80,30 @@ Per-layer mass@K=128 for d128:
 Early layers remain harder for learned retrieval; mid/late trained layers
 exceed raw-QK oracle mass.
 
-### K-retrieve Pareto (packed d128, FAISS HNSW)
+### K-retrieve Pareto (packed d128)
 
-K-sweep for the recommended packed d128 checkpoint:
+Exact top-K sweep for the recommended packed d128 checkpoint:
 
 ```bash
 python k_sweep.py \
   --ckpt /tmp/checkpoints_packed_d128/search_step_1000.pt \
-  --K 16,32,64,128,256,512
+  --K 128,256,512 \
+  --no-use-faiss
 ```
 
 `PPL_full = 224.64` on this packed eval slice.
 
-| K | Recall@K | mass@K | PPL_ANN | PPL gap | FAISS self-pad |
-|---|---:|---:|---:|---:|---:|
-| 16 | 0.154 | 0.171 | 237.29 | +5.63% | 0.293 |
-| 32 | 0.126 | 0.188 | 224.70 | +0.03% | 0.303 |
-| 64 | 0.131 | 0.215 | 225.68 | +0.46% | 0.287 |
-| 128 | 0.166 | 0.256 | 222.14 | -1.11% | 0.255 |
-| 256 | 0.233 | 0.318 | 233.34 | +3.87% | 0.301 |
-| 512 | 0.339 | 0.409 | 270.61 | +20.47% | 0.493 |
+| K | Recall@K | mass@K | PPL_ANN | PPL gap |
+|---|---:|---:|---:|---:|
+| 128 | 0.166 | 0.256 | 203.63 | -9.36% |
+| 256 | 0.233 | 0.318 | 207.06 | -7.83% |
+| 512 | 0.339 | 0.409 | 211.93 | -5.66% |
 
-This confirms the K=128 operating point on the FAISS path for the packed d128
-checkpoint. Larger K values are not currently reliable in the CPU FAISS
-prototype because causal filtering leaves a high self-fill rate; this is a
-prototype retrieval issue, not evidence that larger true top-K is worse.
+This disambiguates the earlier FAISS high-K failure: exact retrieval remains
+strongly negative at K=256/512, so the denoising pattern is present on this
+packed eval slice. The CPU FAISS prototype still needs a proper causal
+variable-K implementation; its current over-fetch/filter/fill path produces
+high self-fill at large K and should not be used for high-K quality claims.
 
 ### Compute / quality knobs (FLOP-counted)
 
@@ -116,9 +115,9 @@ kernel is the natural next step.
 
 | K | PPL gap | Attention scoring reduction |
 |---|---|---|
-| 512 | +20.47% (CPU FAISS prototype; high self-fill) | ~8x |
-| 256 | +3.87% (CPU FAISS prototype) | ~16x |
-| 128 | -1.11% (K-sweep eval; training eval: -1.81%) | ~32x |
+| 512 | -5.66% (exact top-K over learned search space) | ~8x |
+| 256 | -7.83% (exact top-K over learned search space) | ~16x |
+| 128 | -9.36% exact; -1.81% FAISS/training eval | ~32x |
 | 64 | +0.46% | ~64x |
 | 32 | +0.03% | ~128x |
 | 16 | +5.63% | ~256x |
