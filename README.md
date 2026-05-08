@@ -268,6 +268,34 @@ about 3x in favor of learned projections. This supports the theoretical
 scaling claim only; production speed claims still require GPU-resident
 retrieval and KV-cache/decode integration.
 
+### Dynamic-index proxy
+
+The current ANN wrapper is prefill-only (`use_cache=False`), so a true
+generation-time dynamic-index benchmark still requires cache integration. As a
+first capability proxy, `dynamic_index_proxy.py` splits clean block-causal eval
+sequences into a prefill prefix and decode-like suffix, then compares learned
+retrieval mass under two masks:
+
+- dynamic index: suffix queries can retrieve from all same-segment prior keys;
+- static index: suffix queries can retrieve from prefill keys plus a 256-token
+  recent local suffix window, but not older suffix keys.
+
+On the clean d128 block-causal checkpoint, using K=128, prefill length 1024,
+local window 256, and 8 eval batches:
+
+| Setting | Teacher mass captured |
+|---|---:|
+| Dynamic proxy | 0.972 |
+| Static proxy | 0.928 |
+| Static teacher mass available | 0.954 |
+| Dynamic - static | +0.044 |
+
+Per-layer dynamic-minus-static mass ranges from +0.022 (L04) to +0.058 (L08).
+This does not establish task accuracy or decode latency, but it shows that a
+frozen prefill-plus-local index loses measurable teacher-attention mass on
+decode-like suffix queries. The raw result is in
+`artifacts/dynamic_proxy_8b.json`.
+
 ### Compute / quality knobs (FLOP-counted)
 
 `L = 4096`. Compute reduction is the attention scoring step, `≈ L / K`.
