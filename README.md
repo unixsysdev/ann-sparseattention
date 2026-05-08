@@ -9,26 +9,28 @@ and lose almost no model quality.
 
 Research prototype. The trained projections work in a narrow 6-layer packed
 WikiText-103 pilot on `Qwen/Qwen3-4B-Instruct-2507`, but the runtime is still
-a correctness prototype and the evaluation has known packing caveats. Treat
-reported numbers as preliminary until block-causal packed masking, confidence
-intervals, and downstream long-context tasks are run.
+a correctness prototype. Treat reported numbers as preliminary until confidence
+intervals, downstream long-context tasks, and real baselines are run.
 
 **What's validated:**
 - 6-layer packed pilot on Qwen3-4B-Instruct-2507, layers
   `[4, 8, 12, 16, 20, 24]`, 4K context, 1K training steps.
-- `d_search=128` is the current recommended capacity: 3.93M trainable
+- `d_search=128` is the current recommended capacity from the packed capacity
+  ablation: 3.93M trainable
   parameters, mass@K=128 of 0.503 vs 0.488 for the raw-QK exact-topK oracle,
   and -1.81% relative PPL gap at K=128 on the packed eval slice.
+- Block-causal packed masking is implemented. On the clean block-causal d128
+  rerun, exact sparse attention is near parity with full attention
+  (K=128: +0.07% PPL gap; K=256: +0.01%). The large negative PPL gaps from
+  packed-with-leakage do not survive as a clean-methodology headline.
 - Capacity scaling is monotonic but saturating: d64 < d128 < d256 on mass@K,
   while d128 and d256 are effectively tied on final PPL.
 - Learned projections outperform raw-QK oracle mass in mid/late trained layers
   (L12-L24), while early layers remain harder.
 
 **Not yet validated (next iteration):**
-- Packed block-causal masking. Current packed numbers are internally
-  comparable across d_search values, but packed examples can attend across
-  document boundaries.
-- Confidence intervals over multiple seeds and larger eval slices.
+- Confidence intervals for the block-causal result over multiple seeds and
+  larger eval slices.
 - Quest / RetrievalAttention baselines.
 - Long-context task quality (LongBench, RULER, needle-in-haystack).
 - 34-layer / whole-model substitution.
@@ -80,7 +82,7 @@ Per-layer mass@K=128 for d128:
 Early layers remain harder for learned retrieval; mid/late trained layers
 exceed raw-QK oracle mass.
 
-### K-retrieve Pareto (packed d128)
+### K-retrieve Pareto (packed d128, leakage-confounded)
 
 Exact top-K sweep for the recommended packed d128 checkpoint:
 
@@ -99,16 +101,48 @@ python k_sweep.py \
 | 256 | 0.233 | 0.318 | 207.06 | -7.83% |
 | 512 | 0.339 | 0.409 | 211.93 | -5.66% |
 
-This disambiguates the earlier FAISS high-K failure: exact retrieval remains
+This disambiguates the earlier FAISS high-K failure on the leaked packed
+pipeline: exact retrieval remains
 strongly negative at K=256/512, so the denoising pattern is present on this
-packed eval slice. The CPU FAISS prototype still needs a proper causal
-variable-K implementation; its current over-fetch/filter/fill path produces
-high self-fill at large K and should not be used for high-K quality claims.
+packed eval slice. This should not be used as a publication-strength denoising
+claim because packed examples can attend across document boundaries.
 
 A second exact sweep on the next 16 packed eval batches (`--skip-batches 16`)
 preserved the shape: K=128 -8.78%, K=256 -7.59%, K=512 -6.21%. This is still
 not a substitute for confidence intervals, but it reduces the chance that the
 large negative gap is a single-slice accident.
+
+### Block-causal packed d128 (clean masking)
+
+Packed block-causal masking assigns each packed document a `segment_id`, resets
+`position_ids` at segment boundaries, and supplies a 4D additive mask so tokens
+can only attend causally within their own document. Retrieval, loss masking,
+mass@K, and recall@K use the same segment-causal eligibility mask.
+
+Clean d128 block-causal run:
+
+```bash
+python train.py --config pilot_d128_block
+python k_sweep.py \
+  --ckpt /tmp/checkpoints_block_d128/search_step_1000.pt \
+  --K 128,256,512 \
+  --no-use-faiss
+```
+
+`PPL_full = 30.44` on the 16-batch clean eval slice.
+
+| K | Recall@K | mass@K | PPL_ANN | PPL gap |
+|---|---:|---:|---:|---:|
+| 128 | 0.744 | 0.787 | 30.47 | +0.07% |
+| 256 | 0.879 | 0.953 | 30.45 | +0.01% |
+| 512 | n/a | n/a | 30.45 | +0.01% |
+
+K=512 has no meaningful mass/recall average on this WikiText slice because
+almost no same-segment queries have 512 valid causal keys. The quality result
+is still useful: with filler slots masked out of the sparse-attention softmax,
+the block-causal exact path is effectively at full-attention parity. The clean
+result supports "quality-preserving sparse substitution" rather than the leaked
+pipeline's stronger denoising claim.
 
 ### Compute / quality knobs (FLOP-counted)
 
@@ -137,11 +171,10 @@ population-level estimates.
 A few things the pilot does not yet establish, and that the next iteration
 will:
 
-- **Packing**: the reported ablation uses packed examples without a true
-  block-causal segment mask. The relative comparison across d_search values is
-  internally consistent, but absolute PPL/mass numbers are not yet literature
-  comparable. Implement block-causal masking and rerun d128 before making a
-  publication-strength claim.
+- **Packing**: the d_search ablation table is still from the packed
+  leakage-confounded run and is best read as a capacity comparison. The clean
+  block-causal d128 rerun removes cross-document leakage and should be used for
+  quality claims.
 - **Exact-topK oracle**: the obvious follow-up is a four-way Pareto —
   full attention vs. exact top-K (true `QK^T` argmax-K, then attention) vs.
   search-topK (our projections, exact distance) vs. search-ANN (FAISS HNSW).
