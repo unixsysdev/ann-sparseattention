@@ -147,14 +147,17 @@ def build_long_context_dataloader(
     text_field: str = "text",
     split: str = "train",
     dataset_config: str = None,
+    streaming: bool = False,
 ) -> DataLoader:
+    # streaming=True triggers httpx-client-closed crashes between sequential
+    # training runs sharing HF cache. Default off; download once, reuse.
     ds = LongContextPackedDataset(
         hf_dataset_name=dataset_name,
         tokenizer=tokenizer,
         seq_len=seq_len,
         text_field=text_field,
         split=split,
-        streaming=True,
+        streaming=streaming,
         pack=pack,
         dataset_config=dataset_config,
     )
