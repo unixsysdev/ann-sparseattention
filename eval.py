@@ -161,6 +161,38 @@ def compute_perplexity(
     return float(torch.exp(loss).item())
 
 
+def compute_nll(
+    model,
+    input_ids: torch.Tensor,
+    attention_mask: torch.Tensor = None,
+    position_ids: torch.Tensor = None,
+    target_mask: torch.Tensor = None,
+) -> float:
+    """Return mean next-token NLL on the same token set as compute_perplexity."""
+    with torch.no_grad():
+        kwargs = dict(input_ids=input_ids, use_cache=False)
+        if attention_mask is not None:
+            kwargs["attention_mask"] = attention_mask
+        if position_ids is not None:
+            kwargs["position_ids"] = position_ids
+        out = model(**kwargs)
+        logits = out.logits
+
+    shift_logits = logits[..., :-1, :].contiguous()
+    shift_labels = input_ids[..., 1:].contiguous()
+    flat_logits = shift_logits.view(-1, shift_logits.size(-1)).float()
+    flat_labels = shift_labels.view(-1)
+
+    if target_mask is None and attention_mask is not None and attention_mask.dim() == 2:
+        target_mask = attention_mask
+    if target_mask is not None:
+        shifted_mask = target_mask[..., 1:].contiguous().view(-1).bool()
+        flat_logits = flat_logits[shifted_mask]
+        flat_labels = flat_labels[shifted_mask]
+
+    return float(F.cross_entropy(flat_logits, flat_labels, reduction="mean").item())
+
+
 def compute_perplexity_full_attention(
     base_model,
     input_ids: torch.Tensor,
