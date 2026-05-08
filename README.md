@@ -12,6 +12,11 @@ WikiText-103 pilot on `Qwen/Qwen3-4B-Instruct-2507`, but the runtime is still
 a correctness prototype. Treat reported numbers as preliminary until confidence
 intervals, downstream long-context tasks, and real baselines are run.
 
+Checkpoint artifacts and JSON eval outputs are mirrored on Hugging Face:
+[`datasysdev/ann-sparseattention`](https://huggingface.co/datasysdev/ann-sparseattention).
+Use `checkpoints_block_d128/search_step_1000.pt` there for the current clean
+block-causal result.
+
 **What's validated:**
 - 6-layer packed pilot on Qwen3-4B-Instruct-2507, layers
   `[4, 8, 12, 16, 20, 24]`, 4K context, 1K training steps.
