@@ -230,6 +230,31 @@ fewer than K valid causal keys exist; filler slots are masked out of the sparse
 attention softmax. This demonstrates off-the-shelf ANN compatibility in the
 clean block-causal setting, but not production wall-clock speedup.
 
+### Asymptotic scoring analysis
+
+Quest-style page scoring scans every page: `ceil(N / page_size) * d_head`.
+HNSW over the learned search space has approximate candidate-scoring cost
+`M * log2(N) * d_search`. With `page_size=16`, `d_head=128`, `M=32`, and
+`d_search=128`, the analytic operation-count proxy is:
+
+![Candidate-scoring operations per query](artifacts/asymptotic_scoring_ops.svg)
+
+| Context | Quest ops/query | HNSW ops/query | Quest / HNSW |
+|---:|---:|---:|---:|
+| 8K | 65,536 | 53,248 | 1.23x |
+| 16K | 131,072 | 57,344 | 2.29x |
+| 32K | 262,144 | 61,440 | 4.27x |
+| 64K | 524,288 | 65,536 | 8.00x |
+| 128K | 1,048,576 | 69,632 | 15.06x |
+| 256K | 2,097,152 | 73,728 | 28.44x |
+| 512K | 4,194,304 | 77,824 | 53.89x |
+| 1024K | 8,388,608 | 81,920 | 102.40x |
+
+This supports the theoretical scaling claim only: learned projections are
+compatible with sublinear ANN candidate selection, while Quest page scoring is
+linear in page count. It is not a wall-clock benchmark; production speed claims
+still require GPU-resident retrieval and KV-cache/decode integration.
+
 ### Compute / quality knobs (FLOP-counted)
 
 `L = 4096`. Compute reduction is the attention scoring step, `≈ L / K`.

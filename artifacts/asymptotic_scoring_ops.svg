@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="820" height="460" viewBox="0 0 820 460">
+<rect width="100%" height="100%" fill="white"/>
+<line x1="86" y1="390" x2="792" y2="390" stroke="#333"/>
+<line x1="86" y1="32" x2="86" y2="390" stroke="#333"/>
+<line x1="86.0" y1="390" x2="86.0" y2="395" stroke="#333"/>
+<text x="86.0" y="414" text-anchor="middle" font-size="12">8K</text>
+<line x1="287.7" y1="390" x2="287.7" y2="395" stroke="#333"/>
+<text x="287.7" y="414" text-anchor="middle" font-size="12">32K</text>
+<line x1="489.4" y1="390" x2="489.4" y2="395" stroke="#333"/>
+<text x="489.4" y="414" text-anchor="middle" font-size="12">128K</text>
+<line x1="691.1" y1="390" x2="691.1" y2="395" stroke="#333"/>
+<text x="691.1" y="414" text-anchor="middle" font-size="12">512K</text>
+<line x1="792.0" y1="390" x2="792.0" y2="395" stroke="#333"/>
+<text x="792.0" y="414" text-anchor="middle" font-size="12">1024K</text>
+<line x1="81" y1="467.3" x2="86" y2="467.3" stroke="#333"/>
+<text x="76" y="471.3" text-anchor="end" font-size="12">10K</text>
+<line x1="86" y1="467.3" x2="792" y2="467.3" stroke="#eee"/>
+<line x1="81" y1="326.9" x2="86" y2="326.9" stroke="#333"/>
+<text x="76" y="330.9" text-anchor="end" font-size="12">100K</text>
+<line x1="86" y1="326.9" x2="792" y2="326.9" stroke="#eee"/>
+<line x1="81" y1="186.4" x2="86" y2="186.4" stroke="#333"/>
+<text x="76" y="190.4" text-anchor="end" font-size="12">1M</text>
+<line x1="86" y1="186.4" x2="792" y2="186.4" stroke="#eee"/>
+<line x1="81" y1="46.0" x2="86" y2="46.0" stroke="#333"/>
+<text x="76" y="50.0" text-anchor="end" font-size="12">10M</text>
+<line x1="86" y1="46.0" x2="792" y2="46.0" stroke="#eee"/>
+<polyline fill="none" stroke="#c0392b" stroke-width="3" points="86.0,352.6 186.9,310.4 287.7,268.1 388.6,225.8 489.4,183.5 590.3,141.2 691.1,99.0 792.0,56.7" />
+<polyline fill="none" stroke="#1f77b4" stroke-width="3" points="86.0,365.3 186.9,360.8 287.7,356.6 388.6,352.6 489.4,348.9 590.3,345.5 691.1,342.2 792.0,339.0" />
+<text x="410" y="22" text-anchor="middle" font-size="16" font-weight="600">Candidate-scoring operations per query</text>
+<text x="410.0" y="442" text-anchor="middle" font-size="13">Context length (tokens, log scale)</text>
+<text x="18" y="230.0" transform="rotate(-90 18,230.0)" text-anchor="middle" font-size="13">Scalar ops (log scale)</text>
+<rect x="545" y="52" width="226" height="58" fill="white" stroke="#ddd"/>
+<line x1="562" y1="72" x2="602" y2="72" stroke="#c0392b" stroke-width="3"/>
+<text x="612" y="76" font-size="13">Quest page scan</text>
+<line x1="562" y1="94" x2="602" y2="94" stroke="#1f77b4" stroke-width="3"/>
+<text x="612" y="98" font-size="13">HNSW over learned search</text>
+</svg>
