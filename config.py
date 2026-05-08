@@ -43,10 +43,13 @@ class Config:
     learning_rate: float = 1e-4
     weight_decay: float = 0.01
     max_grad_norm: float = 1.0
-    total_steps: int = 2000
+    total_steps: int = 1000        # original pilot plateau'd at ~step 1000;
+                                   # 2K saw recall 50.7% -> 50.9%, basically tied
     warmup_steps: int = 100
-    eval_every: int = 500
-    save_every: int = 200          # ~10 ckpts in the pilot; resume on crash
+    eval_every: int = 250          # 4 eval points (250/500/750/1000) — enough
+                                   # resolution to see convergence shape across
+                                   # d_search values
+    save_every: int = 200
     keep_last_n_checkpoints: int = 5
 
     # Loss weights (α=β=1 for the pilot)
