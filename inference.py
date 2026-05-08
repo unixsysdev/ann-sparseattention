@@ -206,6 +206,21 @@ def _faiss_topk_search(
     key_mask = _normalize_key_mask(raw_key_mask, L)
     allowed_mask = _normalize_allowed_mask(raw_key_mask, L)
     K_eff = min(K, L)
+
+    if allowed_mask is not None:
+        return _faiss_topk_search_allowed_segments(
+            q_search,
+            k_search,
+            K_eff,
+            allowed_mask,
+            key_mask,
+            use_hnsw=use_hnsw,
+            hnsw_M=hnsw_M,
+            hnsw_ef_construction=hnsw_ef_construction,
+            hnsw_ef_search=hnsw_ef_search,
+            return_valid_mask=return_valid_mask,
+        )
+
     out = torch.empty(B, L, K_eff, dtype=torch.long, device=q_search.device)
     out_valid = torch.empty(B, L, K_eff, dtype=torch.bool, device=q_search.device)
 
@@ -277,6 +292,115 @@ def _faiss_topk_search(
             out_valid[b, q, : K_eff] = torch.arange(
                 K_eff, device=q_search.device
             ) < n_real
+
+    FAISS_STATS.append(
+        {
+            "self_pad_rate": n_self_pad / max(1, n_total),
+            "causal_fill_rate": n_strict_prior / max(1, n_total),
+            "self_attn_rate": n_at_self / max(1, n_total),
+            "B": B, "L": L, "K": K_eff,
+        }
+    )
+    if return_valid_mask:
+        return out, out_valid
+    return out
+
+
+def _faiss_topk_search_allowed_segments(
+    q_search: torch.Tensor,
+    k_search: torch.Tensor,
+    K_eff: int,
+    allowed_mask: torch.Tensor,
+    key_mask: torch.Tensor,
+    use_hnsw: bool = True,
+    hnsw_M: int = 32,
+    hnsw_ef_construction: int = 40,
+    hnsw_ef_search: int = 64,
+    return_valid_mask: bool = False,
+):
+    """FAISS search with per-segment indexes derived from a [B,L,L] mask."""
+    import faiss
+
+    B, L, d = q_search.shape
+    out = torch.empty(B, L, K_eff, dtype=torch.long, device=q_search.device)
+    out_valid = torch.empty(B, L, K_eff, dtype=torch.bool, device=q_search.device)
+    fallback_key_mask = key_mask
+    if fallback_key_mask is None:
+        fallback_key_mask = torch.ones(B, L, dtype=torch.bool, device=q_search.device)
+    fallback_keys = _fallback_key_indices(fallback_key_mask, L, allowed_mask)
+
+    n_self_pad = 0
+    n_strict_prior = 0
+    n_at_self = 0
+    n_total = 0
+
+    for b in range(B):
+        starts = torch.full((L,), -1, dtype=torch.long, device=q_search.device)
+        for q in range(L):
+            valid = allowed_mask[b, q].nonzero(as_tuple=False).flatten()
+            if valid.numel() > 0:
+                starts[q] = valid[0]
+
+        for start in starts.unique().tolist():
+            if start < 0:
+                continue
+            q_rows = (starts == start).nonzero(as_tuple=False).flatten()
+            if q_rows.numel() == 0:
+                continue
+            end = int(q_rows.max().item()) + 1
+            seg_len = end - int(start)
+            if seg_len <= 0:
+                continue
+
+            kb = k_search[b, start:end].detach().float().cpu().numpy()
+            qb = q_search[b, q_rows].detach().float().cpu().numpy()
+            kb_n = kb / (1e-9 + (kb ** 2).sum(-1, keepdims=True) ** 0.5)
+            qb_n = qb / (1e-9 + (qb ** 2).sum(-1, keepdims=True) ** 0.5)
+
+            if use_hnsw:
+                index = faiss.IndexHNSWFlat(d, hnsw_M, faiss.METRIC_INNER_PRODUCT)
+                index.hnsw.efConstruction = hnsw_ef_construction
+                index.hnsw.efSearch = hnsw_ef_search
+            else:
+                index = faiss.IndexFlatIP(d)
+            index.add(kb_n)
+
+            over = min(seg_len, max(K_eff * 4, K_eff + 16))
+            _, ids = index.search(qb_n, over)
+            ids_t = torch.from_numpy(ids).to(q_search.device) + int(start)
+
+            for i, q_t in enumerate(q_rows):
+                q = int(q_t.item())
+                row = ids_t[i]
+                valid = allowed_mask[b, q, row.clamp(min=0, max=L - 1)]
+                row = row.masked_fill(~valid, -1)
+                row = row[row >= 0][:K_eff]
+                n_real = int(row.numel())
+                if n_real < K_eff:
+                    fallback = int(fallback_keys[b, q].item())
+                    pad = torch.full(
+                        (K_eff - n_real,),
+                        fallback,
+                        device=q_search.device,
+                        dtype=torch.long,
+                    )
+                    row = torch.cat([row, pad])
+                    n_self_pad += K_eff - n_real
+                real = row[:n_real]
+                n_strict_prior += int((real < q).sum().item())
+                n_at_self += int((real == q).sum().item())
+                n_total += K_eff
+                out[b, q] = row[:K_eff]
+                out_valid[b, q] = torch.arange(K_eff, device=q_search.device) < n_real
+
+        missing = starts < 0
+        if missing.any():
+            q_rows = missing.nonzero(as_tuple=False).flatten()
+            fill = fallback_keys[b, q_rows].unsqueeze(-1).expand(-1, K_eff)
+            out[b, q_rows] = fill
+            out_valid[b, q_rows] = False
+            n_self_pad += int(q_rows.numel()) * K_eff
+            n_total += int(q_rows.numel()) * K_eff
 
     FAISS_STATS.append(
         {
