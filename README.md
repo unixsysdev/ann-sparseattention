@@ -7,20 +7,31 @@ and lose almost no model quality.
 
 ## Current status
 
-Research prototype. The trained projections work, but the runtime and the
-evaluation envelope are both narrow. Treat reported numbers as preliminary.
+Research prototype. The trained projections work in a narrow 6-layer packed
+WikiText-103 pilot on `Qwen/Qwen3-4B-Instruct-2507`, but the runtime is still
+a correctness prototype and the evaluation has known packing caveats. Treat
+reported numbers as preliminary until block-causal packed masking, confidence
+intervals, and downstream long-context tasks are run.
 
 **What's validated:**
-- 6-layer pilot on Qwen3-4B-Instruct-2507 (2K steps, ~25 min on a B200).
-- WikiText-103 PPL is preserved under ANN-substituted attention at K=128
-  (gap ≈ +0.7%) on a 12-batch eval slice.
-- Learned 64-d search projections retrieve attention-relevant keys: at
-  K=128 we capture meaningful teacher attention mass; the K curve is
-  monotonic and well-behaved.
+- 6-layer packed pilot on Qwen3-4B-Instruct-2507, layers
+  `[4, 8, 12, 16, 20, 24]`, 4K context, 1K training steps.
+- `d_search=128` is the current recommended capacity: 3.93M trainable
+  parameters, mass@K=128 of 0.503 vs 0.488 for the raw-QK exact-topK oracle,
+  and -1.81% relative PPL gap at K=128 on the packed eval slice.
+- Capacity scaling is monotonic but saturating: d64 < d128 < d256 on mass@K,
+  while d128 and d256 are effectively tied on final PPL.
+- Learned projections outperform raw-QK oracle mass in mid/late trained layers
+  (L12-L24), while early layers remain harder.
 
 **Not yet validated (next iteration):**
-- 34-layer / whole-model substitution.
+- Packed block-causal masking. Current packed numbers are internally
+  comparable across d_search values, but packed examples can attend across
+  document boundaries.
+- Confidence intervals over multiple seeds and larger eval slices.
+- Quest / RetrievalAttention baselines.
 - Long-context task quality (LongBench, RULER, needle-in-haystack).
+- 34-layer / whole-model substitution.
 - Wall-clock speedup vs. FlashAttention/SDPA — not measured.
 - KV-cache decode-mode integration.
 - GPU-resident ANN or fused gather-attention kernel.
@@ -32,52 +43,68 @@ internally for the gather step. The compute-reduction numbers below are
 production runtime requires a GPU-resident topk kernel or integration with
 paged/block-sparse attention kernels.
 
-Pilot on `Qwen/Qwen3-4B-Instruct-2507`, 2K training steps on WikiText-103,
-6 trained layers, 2M trainable parameters:
+### d_search ablation (packed WikiText-103, K=128)
 
-| Step | Recall@K=128 | PPL gap (full vs ANN) |
-|---|---|---|
-| 500 | 47.4% | 1.21% |
-| 1000 | 50.7% | 0.68% |
-| 1500 | 50.9% | 0.68% |
-| **2000 (final)** | **50.9%** | **0.71%** |
+The packed ablation trains the same 6 layers for 1K steps and evaluates all
+variants with the same packed eval pipeline. `raw_qk` is exact top-K over
+head-mean-aggregated native post-RoPE Q/K vectors; `learned` is exact top-K
+over trained search projections. mass@K is teacher-attention probability
+captured by the retrieved set.
 
-PPL gap is the primary signal: at <1% the model's output is preserved
-under ANN substitution. Recall@K plateaus around step 1000 because the
-softmax-relevant keys are concentrated in the top ~30 — disagreement on
-positions 30-128 is on the near-zero-weight tail and doesn't affect output.
-The repo also reports `mass@K` (sum of teacher attention probability captured
-by the search top-K), which is the more direct retrieval-quality metric
-when the softmax is sharp.
+| d_search | Params | learned mass@K=128 | raw-QK oracle | learned / oracle | Final PPL gap |
+|---|---:|---:|---:|---:|---:|
+| 64 | 1.97M | 0.492 | 0.488 | 1.01x | +2.39% |
+| **128** | **3.93M** | **0.503** | **0.488** | **1.03x** | **-1.81%** |
+| 256 | 7.86M | 0.509 | 0.488 | 1.04x | -1.85% |
 
-**Pilot checkpoint** (step 2000): mirrored at
-[`datasysdev/ann-sparseattention`](https://huggingface.co/datasysdev/ann-sparseattention).
+d128 is the recommended default for this pilot: it captures almost all of the
+d256 quality with half the trainable parameters. d256 improves mass@K slightly
+but does not materially improve final PPL.
 
-### K-retrieve Pareto (pilot step 2000, FAISS HNSW, 12 eval batches)
+PPL gap is the primary model-quality signal; mass@K is the more direct
+retrieval-quality signal when teacher attention is sharp. Recall@K is logged,
+but it is a weaker proxy because disagreement on near-zero-probability tail
+positions can look like low recall while preserving model output.
 
-`PPL_full = 9.958` (full attention reference)
+Per-layer mass@K=128 for d128:
 
-| K | Recall@K | PPL_ANN | PPL gap |
-|---|---|---|---|
-| 16 | 24.9% | 10.71 | +7.51% |
-| 32 | 22.8% | 10.41 | +4.51% |
-| 64 | 23.1% | 10.20 | **+2.42%** |
-| 128 | 26.0% | 10.04 | **+0.82%** |
-| 256 | 31.6% | 9.88 | **−0.79%** |
-| 512 | 40.8% | 9.67 | **−2.89%** |
+| Layer | raw-QK oracle | learned d128 |
+|---|---:|---:|
+| 4 | 0.422 | 0.382 |
+| 8 | 0.518 | 0.421 |
+| 12 | 0.404 | 0.533 |
+| 16 | 0.475 | 0.481 |
+| 20 | 0.499 | 0.551 |
+| 24 | 0.614 | 0.648 |
 
-On this small WikiText slice, `K ≥ 256` produced lower measured PPL than
-the full-attention reference (K=256: −0.79%, K=512: −2.89%). A plausible
-explanation is sparse-attention denoising — full softmax spreads small
-amounts of weight over a long tail of low-relevance keys, top-K
-renormalization concentrates it. But with 12 eval batches, sample noise,
-packed-boundary artifacts (the pilot trained with packing on; default in
-the repo is now off), and partial-layer substitution acting like
-regularization are all candidate explanations we haven't yet ruled out.
-We're treating it as a hypothesis worth confirming rather than the
-explanation. The follow-up — exact-topK oracle vs. ANN-topK at the same K
-— separates "denoising from any sparsity" from "denoising from learned
-projections."
+Early layers remain harder for learned retrieval; mid/late trained layers
+exceed raw-QK oracle mass.
+
+### K-retrieve Pareto (packed d128, FAISS HNSW)
+
+K-sweep for the recommended packed d128 checkpoint:
+
+```bash
+python k_sweep.py \
+  --ckpt /tmp/checkpoints_packed_d128/search_step_1000.pt \
+  --K 16,32,64,128,256,512
+```
+
+`PPL_full = 224.64` on this packed eval slice.
+
+| K | Recall@K | mass@K | PPL_ANN | PPL gap | FAISS self-pad |
+|---|---:|---:|---:|---:|---:|
+| 16 | 0.154 | 0.171 | 237.29 | +5.63% | 0.293 |
+| 32 | 0.126 | 0.188 | 224.70 | +0.03% | 0.303 |
+| 64 | 0.131 | 0.215 | 225.68 | +0.46% | 0.287 |
+| 128 | 0.166 | 0.256 | 222.14 | -1.11% | 0.255 |
+| 256 | 0.233 | 0.318 | 233.34 | +3.87% | 0.301 |
+| 512 | 0.339 | 0.409 | 270.61 | +20.47% | 0.493 |
+
+This confirms the K=128 operating point on the FAISS path for the packed d128
+checkpoint. Larger K values are not currently reliable in the CPU FAISS
+prototype because causal filtering leaves a high self-fill rate; this is a
+prototype retrieval issue, not evidence that larger true top-K is worse.
 
 ### Compute / quality knobs (FLOP-counted)
 
@@ -89,50 +116,28 @@ kernel is the natural next step.
 
 | K | PPL gap | Attention scoring reduction |
 |---|---|---|
-| 512 | −2.89% | ~8× |
-| 256 | −0.79% | ~16× |
-| 128 | +0.82% | ~32× |
-| 64 | +2.42% | ~64× |
-| 32 | +4.51% | ~128× |
-| 16 | +7.51% | ~256× |
+| 512 | +20.47% (CPU FAISS prototype; high self-fill) | ~8x |
+| 256 | +3.87% (CPU FAISS prototype) | ~16x |
+| 128 | -1.11% (K-sweep eval; training eval: -1.81%) | ~32x |
+| 64 | +0.46% | ~64x |
+| 32 | +0.03% | ~128x |
+| 16 | +5.63% | ~256x |
 
-Eval scope for the table above: 12 sequences × 4K tokens of WikiText-103
-validation (~50K tokens) on the pilot's 6-layer checkpoint. Numbers should
-be read as "what we observed on this slice", not population-level estimates;
-confidence intervals and downstream long-context tasks are the natural
-follow-up.
-
-### Per-layer recall (pilot step 2000)
-
-| Layer | Recall@K=128 | Recall@K=512 |
-|---|---|---|
-| 4 | 15.8% | 34.7% |
-| 8 | 22.2% | 38.7% |
-| 12 | 23.4% | 39.1% |
-| 16 | **31.9%** | **45.2%** |
-| 20 | 31.4% | 42.6% |
-| 24 | 31.1% | 44.4% |
-
-Early layers are harder for content-addressable retrieval — their attention
-patterns are more local/positional than semantic. The pattern is consistent
-across K values, so it's a property of the layer, not noise. For the
-headline run this predicts the early-most trained layers (1–5) will
-underperform the rest; informative either way.
+Eval scope for the d_search table: 16 packed validation batches at 4K context
+for PPL/recall during training, and 12 packed batches for `compare_retrieval`
+mass@K. Numbers should be read as "what we observed on this slice", not
+population-level estimates.
 
 ### Caveats / what's next
 
 A few things the pilot does not yet establish, and that the next iteration
 will:
 
-- **Packing**: the pilot's training and eval ran with sequence packing on,
-  without segment-level causal masks (transformers' default forward doesn't
-  build them). The relative PPL gap between full and ANN is internally
-  consistent under this confound, but the negative gap at K≥256 has at
-  least three candidate explanations we haven't yet disentangled —
-  (a) genuine sparse-softmax denoising, (b) ANN happening to filter
-  cross-document keys that full attention attends to, (c) sample noise on
-  ~50K eval tokens. The default config in this repo now has packing off so
-  the next run isolates (a) cleanly.
+- **Packing**: the reported ablation uses packed examples without a true
+  block-causal segment mask. The relative comparison across d_search values is
+  internally consistent, but absolute PPL/mass numbers are not yet literature
+  comparable. Implement block-causal masking and rerun d128 before making a
+  publication-strength claim.
 - **Exact-topK oracle**: the obvious follow-up is a four-way Pareto —
   full attention vs. exact top-K (true `QK^T` argmax-K, then attention) vs.
   search-topK (our projections, exact distance) vs. search-ANN (FAISS HNSW).
@@ -169,8 +174,8 @@ distribution problem at search time.
 
 This work attacks the same problem from the opposite direction. Instead of
 patching the index over hostile vectors, we **train a tiny shared
-low-dimensional projection** (`W_Qs, W_Ks → R^64`) so that `q_search` and
-`k_search` *do* live in the same distribution by construction. Off-the-
+low-dimensional projection** (`W_Qs, W_Ks → R^128` in the recommended pilot)
+so that `q_search` and `k_search` *do* live in the same distribution by construction. Off-the-
 shelf FAISS HNSW with default parameters is then sufficient — there is no
 attention-aware index trick.
 
@@ -191,7 +196,8 @@ how much of that came from the projection vs. the ANN approximation.
 ## How it works
 
 For each full-attention layer `i` we train two linear projections
-`W_Qs^i, W_Ks^i ∈ R^{d_model × d_search}` (d_search=64), so that for any
+`W_Qs^i, W_Ks^i ∈ R^{d_model × d_search}` (recommended pilot: d_search=128),
+so that for any
 hidden state `h`,
 
 ```
@@ -213,8 +219,8 @@ At inference, we monkey-patch each trained layer's attention forward to:
 3. Retrieve top-`K_retrieve` positions (causal-respecting) per query.
 4. Run standard attention restricted to those `K_retrieve` keys.
 
-The base model's parameters are never touched. Only ~2M parameters trained
-total per run.
+The base model's parameters are never touched. The recommended d128 pilot
+trains 3.93M parameters total.
 
 ## Repo layout
 
@@ -242,12 +248,16 @@ export WANDB_API_KEY=<key>      # only — never check it in
 export HF_TOKEN=<token>         # for faster Hub downloads
 
 # Pre-launch checks
-python -c "from transformers import AutoConfig; print(AutoConfig.from_pretrained('Qwen/Qwen3-4B-Instruct-2507'))"
+python -c "from transformers import AutoConfig; \
+print(AutoConfig.from_pretrained('Qwen/Qwen3-4B-Instruct-2507'))"
 python tests/test_qk_reconstruction.py
 python tests/smoke_test.py
 
-# Pilot
-python train.py
+# Packed d_search ablation
+bash scripts/run_packed_ablation.sh
+
+# Default clean pilot (packing off; data-sparse on WikiText articles)
+python train.py --config pilot_d64_clean
 ```
 
 ## Configuration
@@ -258,17 +268,18 @@ The default `Config` is the 1-day pilot:
 |---|---|---|
 | `seq_len` | 4096 | 8192 |
 | `batch_size` | 8 | 8 |
-| `total_steps` | 2000 | 8000 |
+| `total_steps` | 1000 | 6000 |
 | layers trained | 6 (`[4,8,12,16,20,24]`) | 34 (`range(36)` minus reserved `[0, 35]`) |
-| trainable params | 1.97M | 11.1M |
-| `d_search` | 64 | 64 |
+| trainable params | 1.97M at d64; 3.93M at d128 | 11.1M at d64 |
+| `d_search` | 64 default; d128 recommended from ablation | 64 default |
 | `K_retrieve_eval` | 128 | 128 |
 
 Pilot is the proof-of-concept; headline trains every attention layer except
 the first (raw-embedding-adjacent) and last (output-logits-adjacent), which is
 the deployment-relevant claim that the technique scales to dense application.
 
-Switch with `from config import Config, make_headline_config; cfg = make_headline_config()`.
+Use `make_pilot_d128_packed_config()` to reproduce the current recommended
+pilot, or `make_headline_config()` for the broader 34-layer run.
 
 ## Performance choices
 
@@ -309,7 +320,7 @@ The bf16 max-abs differences (~0.05) are just numerical noise; the
 git clone git@github.com:unixsysdev/ann-sparseattention.git
 cd ann-sparseattention
 pip install -r requirements.txt
-python train.py
+python train.py --config pilot_d128_packed
 ```
 
 A single H100/H200/B200 + 8GB GPU RAM for the 4B model + ~10GB for activations
