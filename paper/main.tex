@@ -1,0 +1,358 @@
+\documentclass[10pt]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage[numbers,sort&compress]{natbib}
+
+\title{Trained Retrieval Projections for ANN-Compatible Sparse Attention}
+\author{Anonymous}
+\date{}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Sparse attention can reduce the cost of long-context transformer inference, but
+the candidate-selection step remains a bottleneck. Exact top-$K$ attention over
+native queries and keys preserves the most relevant keys but still requires
+linear or quadratic scoring, while heuristic page-based methods such as Quest
+scan context-length-dependent metadata. We study a post-hoc alternative:
+training small per-layer query and key projections on a frozen language model so
+that attention-relevant keys become nearest neighbors in a low-dimensional
+retrieval space. This makes sparse attention compatible with off-the-shelf
+approximate nearest-neighbor indexes such as FAISS HNSW~\citep{johnson2019billion,malkov2018hnsw},
+without attention-aware graph construction.
+
+On Qwen3-4B-Instruct-2507, training six attention layers with $d_{\mathrm{search}}=128$
+adds 3.93M parameters, about 0.1\% of the base model. With block-causal packed
+evaluation on WikiText-103, exact sparse substitution at $K=128$ is within
+0.07\% relative perplexity of full attention, and FAISS HNSW matches exact
+retrieval within 0.02 percentage points of relative perplexity. Compared with a
+Quest-style page baseline, learned retrieval captures more teacher attention
+mass at the same token budget, but paired NLL evaluation shows Quest is slightly
+better at $K=128$ and statistically tied at $K=256$. The main contribution is
+therefore not a perplexity win over Quest, but an ANN-native sparse-attention
+design point: off-the-shelf indexing, asymptotically logarithmic candidate
+scoring, and a dynamic-index mechanism validated by a suffix-retrieval proxy.
+Under the same HNSW constants used in our FAISS experiments ($M=32$,
+$\mathrm{ef}=64$), the operation-count crossover against Quest-style page
+scoring occurs at roughly 298K tokens, with a 3.06$\times$ scoring advantage at
+1M context.
+\end{abstract}
+
+\section{Introduction}
+
+Long-context transformer inference is increasingly limited by attention over a
+large key-value cache. Sparse attention reduces the value aggregation workload
+by attending to a subset of keys, but the system still needs to decide which
+keys to load. This candidate-selection step determines whether sparse attention
+is merely a quality approximation or a deployable long-context runtime.
+
+The exact top-$K$ oracle computes scores against all keys and keeps the best
+ones. It is a useful quality ceiling for top-$K$ sparse attention, but it does
+not remove the scoring cost. Page-based methods such as Quest reduce this cost
+by storing min/max metadata per page and scanning those metadata at inference
+time~\citep{quest2024}. These methods are simple and strong at moderate context
+lengths, but their candidate-scoring cost remains linear in the number of pages.
+
+We explore a different tradeoff. Instead of searching over the model's native
+queries and keys, we train a small retrieval space for each target attention
+layer. The base model is frozen. For each trained layer, we learn
+$W_Q^s,W_K^s$ so that $W_Q^s h_q$ retrieves the keys that the teacher attention
+distribution assigns high probability to. Because both queries and keys are
+trained into the same search space, standard ANN machinery can be used directly.
+This addresses the practical issue identified by retrieval-based attention
+systems: native Q/K vectors are not necessarily well behaved under vanilla
+nearest-neighbor indexing~\citep{retrievalattention2024}.
+
+Our current result is deliberately narrow. We do not show production wall-clock
+speedups, GPU-resident ANN, or autoregressive KV-cache integration. We do show
+that trained projections preserve full-attention perplexity on a clean
+block-causal evaluation path, that FAISS HNSW is effectively lossless relative
+to exact retrieval at $K=128$, and that the operation-count scaling becomes
+favorable at very long context. We also include a proxy experiment showing that
+suffix queries recover more teacher attention mass when older suffix keys are
+available to the index, validating the mechanism behind dynamic insertion.
+
+Our contributions are:
+\begin{itemize}
+    \item a post-hoc distillation method for training low-dimensional
+    ANN-compatible retrieval projections on a frozen transformer;
+    \item a clean block-causal evaluation showing full-attention parity on a
+    six-layer Qwen3-4B pilot;
+    \item a comparison to a Quest-style page baseline showing higher
+    teacher-attention mass for learned retrieval but no current PPL advantage;
+    \item an exact-vs-FAISS comparison showing that off-the-shelf HNSW preserves
+    the learned retrieval result at $K=128$;
+    \item an operation-count analysis and a dynamic-index proxy that identify
+    the deployment regimes where learned retrieval may be preferable.
+\end{itemize}
+
+\section{Method}
+
+\subsection{Search projections}
+
+For each target attention layer $\ell$, we train two projection matrices
+$W_{Q,\ell}^{s}, W_{K,\ell}^{s} \in \mathbb{R}^{d_{\mathrm{model}}\times d_{\mathrm{search}}}$.
+Given hidden states $h_i$, the search vectors are
+\begin{equation}
+q_i^s = W_{Q,\ell}^{s} h_i,\qquad k_i^s = W_{K,\ell}^{s} h_i.
+\end{equation}
+At inference time, sparse attention retrieves keys using cosine similarity in
+this search space, then computes ordinary attention over the retrieved native
+keys and values. The base model parameters are never updated.
+
+In the pilot experiments, $d_{\mathrm{search}}=128$ and the trained layers are
+$[4,8,12,16,20,24]$ of Qwen3-4B-Instruct-2507. This adds 3.93M trainable
+parameters.
+
+\subsection{Training objective}
+
+The teacher is the frozen full-attention model. For each target layer, we
+capture hidden states entering self-attention and reconstruct teacher attention
+weights from post-RoPE native $Q,K$ on the target layers. The projection module
+is trained with two losses:
+\begin{equation}
+\mathcal{L} = \alpha \mathcal{L}_{\mathrm{InfoNCE}} +
+\beta \mathcal{L}_{\mathrm{KL}}.
+\end{equation}
+The InfoNCE positives are teacher top-$K_{\mathrm{pos}}$ keys for each query.
+The KL term aligns the search-space distribution with the teacher attention
+distribution. In the reported pilot, $\alpha=\beta=1$, $K_{\mathrm{pos}}=16$,
+and the model is trained for 1000 steps.
+
+\subsection{Block-causal packed evaluation}
+
+Short WikiText examples are packed into 4096-token sequences. A naive packed
+attention mask allows tokens to attend across document boundaries, producing a
+large leakage confound. We therefore assign every token a segment id, reset
+position ids at segment boundaries, and construct a four-dimensional additive
+mask that permits attention only when key and query belong to the same segment
+and the key is causal. The same eligibility mask is used for teacher capture,
+loss masking, retrieval metrics, and sparse-attention evaluation.
+
+\section{Experiments}
+
+\subsection{Setup}
+
+All experiments use Qwen3-4B-Instruct-2507 and WikiText-103. Unless stated
+otherwise, evaluation uses packed block-causal batches of length 4096. The
+headline clean checkpoint is the $d_{\mathrm{search}}=128$ six-layer run at
+step 1000. We report relative PPL gap against full attention:
+\begin{equation}
+\mathrm{gap} = \frac{\mathrm{PPL}_{\mathrm{sparse}} -
+\mathrm{PPL}_{\mathrm{full}}}{\mathrm{PPL}_{\mathrm{full}}}.
+\end{equation}
+We also report mass@$K$, the teacher attention probability assigned to the
+retrieved key set. This is a retrieval-fidelity metric and should not be read
+as a direct substitute for PPL.
+
+\subsection{Clean block-causal quality}
+
+Table~\ref{tab:block-causal} shows the clean d128 result. The exact learned
+retrieval path is effectively at full-attention parity.
+
+\begin{table}[h]
+\centering
+\caption{Clean block-causal d128 evaluation.}
+\label{tab:block-causal}
+\begin{tabular}{rrrrr}
+\toprule
+$K$ & Recall@$K$ & mass@$K$ & PPL & PPL gap \\
+\midrule
+128 & 0.744 & 0.787 & 30.47 & +0.07\% \\
+256 & 0.879 & 0.953 & 30.45 & +0.01\% \\
+512 & n/a & n/a & 30.45 & +0.01\% \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The earlier packed-with-leakage run produced large negative PPL gaps. Those
+numbers do not survive clean block-causal masking and should not be treated as
+a denoising headline. The clean result supports the narrower claim that learned
+retrieval can preserve full-attention quality on this slice.
+
+\subsection{Quest-style page baseline}
+
+We compare against a Quest-style min/max page selector with page size 16,
+native post-RoPE Q/K, and the same block-causal token eligibility mask. This is
+a correctness baseline, not an optimized Quest runtime. Table~\ref{tab:quest}
+shows the aggregate results.
+
+\begin{table}[h]
+\centering
+\caption{Learned retrieval vs. Quest-style page selection on the same clean eval slice.}
+\label{tab:quest}
+\begin{tabular}{llrrrr}
+\toprule
+Method & $K$ & Recall@$K$ & mass@$K$ & PPL & PPL gap \\
+\midrule
+Learned exact & 128 & 0.744 & 0.787 & 30.47 & +0.07\% \\
+Quest-style page & 128 & 0.669 & 0.727 & 30.41 & -0.11\% \\
+Learned exact & 256 & 0.879 & 0.953 & 30.45 & +0.01\% \\
+Quest-style page & 256 & 0.838 & 0.909 & 30.45 & +0.03\% \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Learned retrieval captures more teacher attention mass at the same nominal
+token budget. However, paired NLL evaluation gives a more conservative quality
+comparison. At $K=128$, learned retrieval is slightly worse than Quest by
+$0.00205$ NLL with 95\% bootstrap CI $[0.00160,0.00251]$, corresponding to
+about +0.206\% relative PPL. At $K=256$, the methods are statistically tied
+with NLL delta $-0.00005$ and CI $[-0.00029,0.00018]$. We therefore do not
+claim a PPL advantage over Quest.
+
+\subsection{FAISS compatibility}
+
+The purpose of training a retrieval space is to make off-the-shelf ANN usable.
+Table~\ref{tab:faiss} compares exact learned retrieval to CPU FAISS HNSW on the
+same clean slice. The FAISS path uses per-segment indexes when a block-causal
+mask is present.
+
+\begin{table}[h]
+\centering
+\caption{Exact learned search vs. FAISS HNSW.}
+\label{tab:faiss}
+\begin{tabular}{lrrr}
+\toprule
+Method & $K$ & PPL & PPL gap \\
+\midrule
+Learned exact & 128 & 30.47 & +0.07\% \\
+Learned FAISS/HNSW & 128 & 30.47 & +0.09\% \\
+Learned exact & 256 & 30.45 & +0.01\% \\
+Learned FAISS/HNSW & 256 & 30.46 & +0.04\% \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+At $K=128$, the FAISS approximation changes relative PPL by only 0.02
+percentage points. This supports the ANN-compatibility claim. It is not a
+wall-clock result: the prototype builds CPU indexes per forward pass and is
+not a deployable kernel.
+
+\subsection{Asymptotic scoring analysis}
+
+Candidate scoring is the cost of deciding which keys to attend to before the
+sparse softmax and value multiply. For one query at context length $N$, we use
+the following operation-count proxy:
+\begin{align}
+\mathrm{Full}(N) &= N d_{\mathrm{head}} = 128N,\\
+\mathrm{Quest}(N) &= \frac{N}{16}\cdot 2d_{\mathrm{head}} = 16N,\\
+\mathrm{HNSW}(N) &= M\cdot \mathrm{ef}\cdot \log_2(N)\cdot d_{\mathrm{search}}.
+\end{align}
+Using the same HNSW constants as our FAISS experiments, $M=32$,
+$\mathrm{ef}=64$, and $d_{\mathrm{search}}=128$, the Quest/HNSW crossover is
+approximately 297,937 tokens. Table~\ref{tab:scaling} shows representative
+points.
+
+\begin{table}[h]
+\centering
+\caption{Per-query candidate-scoring operation-count proxy.}
+\label{tab:scaling}
+\begin{tabular}{rrrr}
+\toprule
+Context & Quest ops/query & Learned HNSW ops/query & Quest / learned \\
+\midrule
+128K & 2,048,000 & 4,447,479 & 0.46$\times$ \\
+256K & 4,096,000 & 4,709,623 & 0.87$\times$ \\
+512K & 8,192,000 & 4,971,767 & 1.65$\times$ \\
+1M & 16,000,000 & 5,224,942 & 3.06$\times$ \\
+2M & 32,000,000 & 5,487,086 & 5.83$\times$ \\
+4M & 64,000,000 & 5,749,230 & 11.13$\times$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+This is only an analytic scoring proxy. It does not include GPU memory
+behavior, index construction, cache layout, or sparse gather implementation.
+It does show that the learned-retrieval design has a different scaling regime:
+Quest is cheaper at moderate context under these conservative high-recall HNSW
+constants, while learned HNSW becomes cheaper at very long context.
+
+\subsection{Dynamic-index proxy}
+
+The current inference wrapper is prefill-only and sets \texttt{use\_cache=False},
+so we do not yet evaluate autoregressive insertion into a live KV cache. As a
+mechanism check, we construct a suffix-retrieval proxy. Each clean eval sequence
+is split into a 1024-token prefix and a decode-like suffix. The dynamic proxy
+allows suffix queries to retrieve from all same-segment prior keys. The static
+proxy allows suffix queries to retrieve from prefill keys plus a 256-token local
+suffix window, but hides older suffix keys.
+
+\begin{table}[h]
+\centering
+\caption{Dynamic-index proxy at $K=128$ over 8 eval batches.}
+\label{tab:dynamic}
+\begin{tabular}{lr}
+\toprule
+Setting & Teacher mass captured \\
+\midrule
+Dynamic proxy & 0.972 \\
+Static proxy & 0.928 \\
+Static teacher mass available & 0.954 \\
+Dynamic - static & +0.044 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The proxy shows that hiding older suffix keys costs measurable teacher-attention
+mass. It validates the mechanism that decoded keys should remain retrievable
+when added to the same learned search space. It does not show task accuracy,
+decode latency, or real incremental insertion quality; those require cache
+integration.
+
+\section{Discussion}
+
+The current evidence supports a specific design point. Learned retrieval does
+not currently beat Quest on perplexity at $K=128$, and it ties Quest at
+$K=256$. Its advantages are architectural: the retrieval space is directly
+compatible with standard ANN, candidate scoring can be logarithmic in context
+length, and new keys can in principle be inserted into the same index during
+generation. These properties are most relevant at very long context and in
+decode-heavy workloads, not necessarily in moderate-context prefill.
+
+The results also show why paired evaluation matters. Aggregate PPL parity with
+full attention can hide a small but statistically robust ordering between two
+sparse methods. Likewise, retrieval mass is useful for diagnosing whether the
+search space captures teacher attention, but higher mass does not guarantee
+lower PPL.
+
+\section{Limitations}
+
+This is a prototype study. The main limitations are:
+\begin{itemize}
+    \item no production wall-clock benchmark; operation counts are analytic
+    proxies;
+    \item no GPU-resident ANN or fused sparse attention kernel;
+    \item no autoregressive KV-cache integration; dynamic indexing is supported
+    only by a retrieval-mass proxy;
+    \item experiments are on one model family, one model size, one dataset, and
+    six target layers;
+    \item evaluation slices are modest, and multi-seed confidence intervals for
+    training are not yet reported;
+    \item Quest and FAISS are correctness baselines rather than optimized
+    production implementations.
+\end{itemize}
+
+\section{Conclusion}
+
+Training low-dimensional retrieval projections provides an ANN-compatible route
+to sparse attention in frozen transformers. In a clean Qwen3-4B pilot, the
+method preserves full-attention perplexity and allows FAISS HNSW to match exact
+learned retrieval, while remaining competitive but not superior to a
+Quest-style page baseline on PPL. The most promising argument for the method is
+therefore not immediate quality improvement, but deployment structure:
+standard ANN compatibility, favorable long-context scoring asymptotics, and a
+natural path to dynamic index insertion. Turning that structure into a strong
+systems result requires the next engineering step: GPU-resident retrieval and
+decode-mode KV-cache integration.
+
+\bibliographystyle{plainnat}
+\bibliography{references}
+
+\end{document}
