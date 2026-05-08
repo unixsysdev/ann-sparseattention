@@ -53,6 +53,7 @@ def _exact_topk_search(
     K: int,
     causal: bool = True,
     key_mask: torch.Tensor = None,
+    return_valid_mask: bool = False,
 ) -> torch.Tensor:
     """
     q_search, k_search: [B, L, d_search].
@@ -68,26 +69,33 @@ def _exact_topk_search(
     q_n = F.normalize(q_search, dim=-1)
     k_n = F.normalize(k_search, dim=-1)
     sim = torch.bmm(q_n, k_n.transpose(1, 2))  # [B, L, L]
+    valid = None
     if allowed_mask is not None:
+        valid = allowed_mask
         sim = sim.masked_fill(~allowed_mask, -1e9)
     elif causal:
         mask = torch.ones(L, L, device=sim.device, dtype=torch.bool).tril()
+        valid = mask.unsqueeze(0).expand(B, L, L)
         sim = sim.masked_fill(~mask, -1e9)
     if key_mask is not None and allowed_mask is None:
         # Block pad keys for every query.
-        sim = sim.masked_fill(~key_mask.unsqueeze(1).bool(), -1e9)
+        key_valid = key_mask.unsqueeze(1).bool()
+        valid = valid & key_valid if valid is not None else key_valid.expand(B, L, L)
+        sim = sim.masked_fill(~key_valid, -1e9)
     K_eff = min(K, L)
     top = sim.topk(K_eff, dim=-1).indices  # [B, L, K_eff]
-    if key_mask is not None:
-        if allowed_mask is not None:
-            valid = allowed_mask
-        else:
-            key_pos = torch.arange(L, device=sim.device).view(1, 1, L)
-            q_pos = torch.arange(L, device=sim.device).view(1, L, 1)
-            valid = key_mask[:, None, :] & ((key_pos <= q_pos) if causal else True)
+    top_valid = None
+    if valid is not None:
         top_valid = valid.gather(-1, top)
-        fallback = _fallback_key_indices(key_mask, L, allowed_mask).unsqueeze(-1)
+        fallback_key_mask = key_mask
+        if fallback_key_mask is None:
+            fallback_key_mask = torch.ones(B, L, dtype=torch.bool, device=sim.device)
+        fallback = _fallback_key_indices(fallback_key_mask, L, allowed_mask).unsqueeze(-1)
         top = torch.where(top_valid, top, fallback)
+    if return_valid_mask:
+        if top_valid is None:
+            top_valid = torch.ones_like(top, dtype=torch.bool)
+        return top, top_valid
     return top
 
 
@@ -167,6 +175,7 @@ def _faiss_topk_search(
     hnsw_ef_construction: int = 40,
     hnsw_ef_search: int = 64,
     key_mask: torch.Tensor = None,
+    return_valid_mask: bool = False,
 ) -> torch.Tensor:
     """
     FAISS-backed approximate top-K.
@@ -184,7 +193,13 @@ def _faiss_topk_search(
     try:
         import faiss
     except ImportError:
-        return _exact_topk_search(q_search, k_search, K, causal=causal)
+        return _exact_topk_search(
+            q_search,
+            k_search,
+            K,
+            causal=causal,
+            return_valid_mask=return_valid_mask,
+        )
 
     B, L, d = q_search.shape
     raw_key_mask = key_mask
@@ -192,6 +207,7 @@ def _faiss_topk_search(
     allowed_mask = _normalize_allowed_mask(raw_key_mask, L)
     K_eff = min(K, L)
     out = torch.empty(B, L, K_eff, dtype=torch.long, device=q_search.device)
+    out_valid = torch.empty(B, L, K_eff, dtype=torch.bool, device=q_search.device)
 
     # Diagnostic counters: how many slots got self-padded vs. filled with a
     # strictly-prior causal neighbor.
@@ -258,6 +274,9 @@ def _faiss_topk_search(
             n_at_self += int((real == q).sum().item())
             n_total += K_eff
             out[b, q, : K_eff] = row[: K_eff]
+            out_valid[b, q, : K_eff] = torch.arange(
+                K_eff, device=q_search.device
+            ) < n_real
 
     FAISS_STATS.append(
         {
@@ -267,6 +286,8 @@ def _faiss_topk_search(
             "B": B, "L": L, "K": K_eff,
         }
     )
+    if return_valid_mask:
+        return out, out_valid
     return out
 
 
@@ -296,6 +317,7 @@ def _ann_attention(
     k: torch.Tensor,
     v: torch.Tensor,
     retrieved: torch.Tensor,
+    retrieved_valid: torch.Tensor = None,
 ) -> torch.Tensor:
     """
     q: [B, H_q,  L, d_head]
@@ -314,10 +336,13 @@ def _ann_attention(
     k_g, v_g = _gather_kv(k, v, retrieved)
     # scores: einsum over d_head; q [B,H,L,d_head] vs k_g [B,H,L,K,d_head]
     scores = torch.einsum("bhld,bhlkd->bhlk", q, k_g) / math.sqrt(d_head)
-    # Mask out padded fillers (where retrieved == query position used as pad);
-    # since the pad value is the query position itself, it's already valid, so
-    # no extra masking is required for correctness.
+    if retrieved_valid is not None:
+        scores = scores.masked_fill(
+            ~retrieved_valid.unsqueeze(1),
+            torch.finfo(scores.dtype).min,
+        )
     weights = F.softmax(scores, dim=-1)
+    weights = torch.nan_to_num(weights, nan=0.0)
     # out: [B, H, L, d_head]
     out = torch.einsum("bhlk,bhlkd->bhld", weights, v_g)
     return out
@@ -396,7 +421,7 @@ class ANNAttentionWrapper:
             with torch.no_grad():
                 q_search, k_search = wrapper.search_projection(hidden_states)
                 if wrapper.use_faiss:
-                    retrieved = _faiss_topk_search(
+                    retrieved, retrieved_valid = _faiss_topk_search(
                         q_search,
                         k_search,
                         wrapper.K_retrieve,
@@ -405,14 +430,20 @@ class ANNAttentionWrapper:
                         hnsw_ef_construction=wrapper.hnsw_ef_construction,
                         hnsw_ef_search=wrapper.hnsw_ef_search,
                         key_mask=key_mask,
+                        return_valid_mask=True,
                     )
                 else:
-                    retrieved = _exact_topk_search(
-                        q_search, k_search, wrapper.K_retrieve,
+                    retrieved, retrieved_valid = _exact_topk_search(
+                        q_search,
+                        k_search,
+                        wrapper.K_retrieve,
                         key_mask=key_mask,
+                        return_valid_mask=True,
                     )
 
-            attn_out = _ann_attention(q, k, v, retrieved)  # [B, H, L, d_head]
+            attn_out = _ann_attention(
+                q, k, v, retrieved, retrieved_valid
+            )  # [B, H, L, d_head]
             attn_out = attn_out.transpose(1, 2).contiguous().view(B, L, -1)
             attn_out = self.o_proj(attn_out)
             return attn_out, None
