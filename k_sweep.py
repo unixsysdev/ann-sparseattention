@@ -26,6 +26,7 @@ from data import build_eval_data, model_attention_mask  # noqa: E402
 from eval import (  # noqa: E402
     _per_position_mass_at_k,
     _per_position_recall,
+    _query_has_k_valid_keys,
     compute_perplexity,
 )
 import inference  # noqa: E402
@@ -176,8 +177,9 @@ def k_sweep(
                     attention_allowed_mask=allowed_m,
                 )
                 B, L = rec.shape
-                pos = torch.arange(L, device=rec.device).unsqueeze(0).expand(B, L)
-                mask = pos >= K
+                mask = _query_has_k_valid_keys(
+                    L, K, rec.device, B, attention_allowed_mask=allowed_m
+                )
                 per_layer_recall[idx].extend(rec.masked_select(mask).tolist())
 
                 _, mass = _per_position_mass_at_k(

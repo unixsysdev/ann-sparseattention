@@ -24,6 +24,21 @@ def _causal_mask(L: int, device) -> torch.Tensor:
     return torch.ones(L, L, device=device, dtype=torch.bool).tril()
 
 
+def _query_has_k_valid_keys(
+    L: int,
+    K: int,
+    device,
+    B: int,
+    attention_allowed_mask: torch.Tensor = None,
+) -> torch.Tensor:
+    """Return [B, L] queries with enough valid keys for a K-way comparison."""
+    K_eff = min(K, L)
+    if attention_allowed_mask is not None:
+        return attention_allowed_mask.bool().sum(dim=-1) >= K_eff
+    pos = torch.arange(L, device=device).unsqueeze(0).expand(B, L)
+    return (pos + 1) >= K_eff
+
+
 def _per_position_mass_at_k(
     teacher_full: torch.Tensor,   # [B, H, L, L]  per-head teacher distribution
     q_search: torch.Tensor,        # [B, L, d_search]
@@ -327,8 +342,9 @@ def evaluate(base_model, search_module, capture, config, tokenizer) -> Dict:
                         attention_allowed_mask=allowed_mask,
                     )  # [B, L]
                     B, L = rec.shape
-                    pos = torch.arange(L, device=rec.device).unsqueeze(0).expand(B, L)
-                    mask = pos >= K
+                    mask = _query_has_k_valid_keys(
+                        L, K, rec.device, B, attention_allowed_mask=allowed_mask
+                    )
                     vals = rec.masked_select(mask)
                     recall_acc[layer_idx][K].extend(vals.tolist())
 

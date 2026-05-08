@@ -85,6 +85,7 @@ def _mass_against_per_head_teacher(
     retrieved: torch.Tensor,        # [B, L, K]
     K: int,
     query_mask: torch.Tensor = None,  # [B, L], 1 = real, 0 = pad
+    key_mask: torch.Tensor = None,
 ) -> torch.Tensor:
     """
     For each (b, h, q) with q >= K and q a real (non-pad) token, return the
@@ -97,8 +98,13 @@ def _mass_against_per_head_teacher(
     grid.scatter_(-1, retrieved, True)
     grid = grid.unsqueeze(1).expand(B, H, L, L)
     mass = (teacher_full * grid.to(teacher_full.dtype)).sum(-1)  # [B, H, L]
-    pos = torch.arange(L, device=device).view(1, 1, L)
-    keep = (pos >= K).expand(B, H, L)
+    allowed = _normalize_allowed_mask(key_mask, L) if key_mask is not None else None
+    if allowed is not None:
+        keep_q = allowed.sum(dim=-1) >= min(K, L)
+    else:
+        pos = torch.arange(L, device=device).view(1, L)
+        keep_q = (pos + 1) >= min(K, L)
+    keep = keep_q.unsqueeze(1).expand(B, H, L)
     if query_mask is not None:
         keep = keep & query_mask.unsqueeze(1).bool().expand(B, H, L)
     if keep.sum() == 0:
@@ -207,12 +213,20 @@ def main():
                 learned_topk_K = learned_topk_full[..., :K]
                 acc[K]["raw_qk"][layer].append(
                     _mass_against_per_head_teacher(
-                        teacher_full, raw_topk_K, K, query_mask=attention_mask
+                        teacher_full,
+                        raw_topk_K,
+                        K,
+                        query_mask=attention_mask,
+                        key_mask=model_mask,
                     )
                 )
                 acc[K]["learned"][layer].append(
                     _mass_against_per_head_teacher(
-                        teacher_full, learned_topk_K, K, query_mask=attention_mask
+                        teacher_full,
+                        learned_topk_K,
+                        K,
+                        query_mask=attention_mask,
+                        key_mask=model_mask,
                     )
                 )
 
