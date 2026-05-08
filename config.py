@@ -231,3 +231,28 @@ def make_headline_d128_config() -> Config:
     cfg.wandb_run_name = "headline-d128-34layers"
     cfg.checkpoint_dir = "/tmp/checkpoints_headline_d128"
     return cfg
+
+
+def make_all36_d128_block_config() -> Config:
+    """
+    All-attention-layer clean run: d_search=128 on every layer, with packed
+    block-causal masking. This is the strongest "ANN all-out" pilot.
+
+    Batch size is reduced because QK reconstruction stores teacher attention
+    for every trained layer. At 4K context, batch 8 is plausible for 6 layers
+    but too aggressive for all 36 layers.
+    """
+    cfg = make_pilot_d128_block_config()
+    cfg.full_attention_layer_indices = list(range(36))
+    cfg.reserved_full_attention_indices = []
+    cfg.batch_size = 2
+    cfg.gradient_accumulation_steps = 4  # keep effective batch near the 6-layer pilot
+    cfg.total_steps = 1000
+    cfg.eval_every = 250
+    cfg.save_every = 100
+    cfg.keep_last_n_checkpoints = 10
+    cfg.eval_num_batches = 8
+    cfg.log_every = 25
+    cfg.wandb_run_name = "all36-d128-block-causal"
+    cfg.checkpoint_dir = "/tmp/checkpoints_all36_d128_block"
+    return cfg
