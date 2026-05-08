@@ -144,6 +144,25 @@ the block-causal exact path is effectively at full-attention parity. The clean
 result supports "quality-preserving sparse substitution" rather than the leaked
 pipeline's stronger denoising claim.
 
+Clean block-causal per-layer `compare_retrieval` at K=128:
+
+| Layer | raw-QK oracle mass | learned d128 mass |
+|---|---:|---:|
+| 4 | 0.956 | 0.950 |
+| 8 | 0.977 | 0.976 |
+| 12 | 0.970 | 0.977 |
+| 16 | 0.964 | 0.970 |
+| 20 | 0.970 | 0.983 |
+| 24 | 0.978 | 0.984 |
+| avg | 0.969 | 0.973 |
+
+This changes the per-layer interpretation from the leakage-confounded pilot:
+with segment isolation, early trained layers are not diffuse or uniquely hard.
+All six trained layers have high oracle mass, and learned projections match or
+slightly exceed raw-QK retrieval across the set. The deployment hypothesis for
+the next run is therefore "substitute all tested layers" rather than "keep early
+layers as full attention," pending a broader all-layer run.
+
 ### Compute / quality knobs (FLOP-counted)
 
 `L = 4096`. Compute reduction is the attention scoring step, `≈ L / K`.
