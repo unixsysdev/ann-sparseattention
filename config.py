@@ -249,8 +249,8 @@ def make_all36_d128_block_config() -> Config:
     cfg.gradient_accumulation_steps = 4  # keep effective batch near the 6-layer pilot
     cfg.total_steps = 1000
     cfg.eval_every = 250
-    cfg.save_every = 100
-    cfg.keep_last_n_checkpoints = 10
+    cfg.save_every = 25
+    cfg.keep_last_n_checkpoints = 20
     cfg.eval_num_batches = 8
     cfg.log_every = 25
     cfg.compile_search_module = False
