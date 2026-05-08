@@ -232,28 +232,41 @@ clean block-causal setting, but not production wall-clock speedup.
 
 ### Asymptotic scoring analysis
 
-Quest-style page scoring scans every page: `ceil(N / page_size) * d_head`.
-HNSW over the learned search space has approximate candidate-scoring cost
-`M * log2(N) * d_search`. With `page_size=16`, `d_head=128`, `M=32`, and
-`d_search=128`, the analytic operation-count proxy is:
+`artifacts/scaling_analysis.md` gives a deterministic operation-count proxy
+for the per-query candidate scoring step. This is the cost of identifying
+which keys to attend to, before the sparse attention softmax and value
+multiply over the selected keys.
 
-![Candidate-scoring operations per query](artifacts/asymptotic_scoring_ops.svg)
+Assumptions:
 
-| Context | Quest ops/query | HNSW ops/query | Quest / HNSW |
-|---:|---:|---:|---:|
-| 8K | 65,536 | 53,248 | 1.23x |
-| 16K | 131,072 | 57,344 | 2.29x |
-| 32K | 262,144 | 61,440 | 4.27x |
-| 64K | 524,288 | 65,536 | 8.00x |
-| 128K | 1,048,576 | 69,632 | 15.06x |
-| 256K | 2,097,152 | 73,728 | 28.44x |
-| 512K | 4,194,304 | 77,824 | 53.89x |
-| 1024K | 8,388,608 | 81,920 | 102.40x |
+- Full attention scoring: `N * d_head = N * 128`.
+- Quest-style page scoring: `(N / page_size) * 2 * d_head = N * 16`
+  with `page_size=16`.
+- Learned HNSW scoring: `M * ef_search * log2(N) * d_search`
+  with `M=32`, `ef_search=64`, and `d_search=128`.
 
-This supports the theoretical scaling claim only: learned projections are
-compatible with sublinear ANN candidate selection, while Quest page scoring is
-linear in page count. It is not a wall-clock benchmark; production speed claims
-still require GPU-resident retrieval and KV-cache/decode integration.
+![Candidate-scoring operations per query](artifacts/scaling_plot.svg)
+
+| Context | Full ops/query | Quest ops/query | Learned HNSW ops/query | Quest / learned |
+|---:|---:|---:|---:|---:|
+| 4K | 512,000 | 64,000 | 3,136,759 | 0.02x |
+| 8K | 1,024,000 | 128,000 | 3,398,903 | 0.04x |
+| 16K | 2,048,000 | 256,000 | 3,661,047 | 0.07x |
+| 32K | 4,096,000 | 512,000 | 3,923,191 | 0.13x |
+| 64K | 8,192,000 | 1,024,000 | 4,185,335 | 0.24x |
+| 128K | 16,384,000 | 2,048,000 | 4,447,479 | 0.46x |
+| 256K | 32,768,000 | 4,096,000 | 4,709,623 | 0.87x |
+| 512K | 65,536,000 | 8,192,000 | 4,971,767 | 1.65x |
+| 1M | 128,000,000 | 16,000,000 | 5,224,942 | 3.06x |
+| 2M | 256,000,000 | 32,000,000 | 5,487,086 | 5.83x |
+| 4M | 512,000,000 | 64,000,000 | 5,749,230 | 11.13x |
+
+Under these conservative HNSW constants, Quest is cheaper below the
+few-hundred-thousand-token regime and learned-projection scoring becomes
+cheaper beyond roughly 300K tokens. At 1M context, the operation-count proxy is
+about 3x in favor of learned projections. This supports the theoretical
+scaling claim only; production speed claims still require GPU-resident
+retrieval and KV-cache/decode integration.
 
 ### Compute / quality knobs (FLOP-counted)
 
