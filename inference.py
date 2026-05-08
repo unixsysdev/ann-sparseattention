@@ -62,6 +62,7 @@ def _exact_topk_search(
     vectors, restricted to causal (key index <= query index).
     """
     B, L, _ = q_search.shape
+    key_mask = _normalize_key_mask(key_mask, L)
     q_n = F.normalize(q_search, dim=-1)
     k_n = F.normalize(k_search, dim=-1)
     sim = torch.bmm(q_n, k_n.transpose(1, 2))  # [B, L, L]
@@ -72,7 +73,15 @@ def _exact_topk_search(
         # Block pad keys for every query.
         sim = sim.masked_fill(~key_mask.unsqueeze(1).bool(), -1e9)
     K_eff = min(K, L)
-    return sim.topk(K_eff, dim=-1).indices  # [B, L, K_eff]
+    top = sim.topk(K_eff, dim=-1).indices  # [B, L, K_eff]
+    if key_mask is not None:
+        key_pos = torch.arange(L, device=sim.device).view(1, 1, L)
+        q_pos = torch.arange(L, device=sim.device).view(1, L, 1)
+        valid = key_mask[:, None, :] & ((key_pos <= q_pos) if causal else True)
+        top_valid = valid.gather(-1, top)
+        fallback = _fallback_key_indices(key_mask, L).unsqueeze(-1)
+        top = torch.where(top_valid, top, fallback)
+    return top
 
 
 # Diagnostics for the FAISS path. Every call appends a dict to FAISS_STATS;
@@ -86,6 +95,42 @@ def _exact_topk_search(
 # If self_pad_rate is non-trivial, K-sweep numbers are partially driven by
 # self-padding rather than learned retrieval.
 FAISS_STATS: list = []
+
+
+def _normalize_key_mask(key_mask: torch.Tensor, L: int) -> Optional[torch.Tensor]:
+    """
+    Return a [B, L] boolean key-valid mask from either the original tokenizer
+    attention_mask ([B, L], 1=real) or the expanded HF causal mask
+    ([B, 1, L, L], 0/finite=allowed, -inf/min=masked).
+    """
+    if key_mask is None:
+        return None
+    if key_mask.dim() == 2:
+        return key_mask[:, :L].bool()
+    if key_mask.dim() == 4:
+        # HF passes the already-expanded additive causal mask down to attention.
+        # A key is real if any query row is allowed to attend to that key.
+        km = key_mask[..., :L, :L]
+        if km.dtype == torch.bool:
+            return (~km).any(dim=-2).squeeze(1)
+        return (km >= 0).any(dim=-2).squeeze(1)
+    raise ValueError(f"Unsupported key_mask shape: {tuple(key_mask.shape)}")
+
+
+def _fallback_key_indices(key_mask: torch.Tensor, L: int) -> torch.Tensor:
+    """For each query position, choose the latest real causal key as filler."""
+    B = key_mask.shape[0]
+    device = key_mask.device
+    key_pos = torch.arange(L, device=device).view(1, 1, L)
+    q_pos = torch.arange(L, device=device).view(1, L, 1)
+    valid = key_mask[:, None, :] & (key_pos <= q_pos)
+    scored = torch.where(
+        valid,
+        key_pos.expand(B, L, L),
+        torch.full((B, L, L), -1, device=device, dtype=key_pos.dtype),
+    )
+    fallback = scored.max(dim=-1).values
+    return fallback.clamp(min=0)
 
 
 def _faiss_topk_search(
@@ -118,6 +163,7 @@ def _faiss_topk_search(
         return _exact_topk_search(q_search, k_search, K, causal=causal)
 
     B, L, d = q_search.shape
+    key_mask = _normalize_key_mask(key_mask, L)
     K_eff = min(K, L)
     out = torch.empty(B, L, K_eff, dtype=torch.long, device=q_search.device)
 
@@ -131,8 +177,10 @@ def _faiss_topk_search(
     # Per-batch pad mask in CPU bool form for cheap filtering inside the loop.
     if key_mask is not None:
         pad_b = (~key_mask.bool()).cpu()  # True at pad
+        fallback_keys = _fallback_key_indices(key_mask, L)
     else:
         pad_b = None
+        fallback_keys = None
 
     for b in range(B):
         kb = k_search[b].detach().float().cpu().numpy()
@@ -166,9 +214,10 @@ def _faiss_topk_search(
             row = row[row >= 0][: K_eff]
             n_real = int(row.numel())
             if n_real < K_eff:
+                fallback = int(fallback_keys[b, q].item()) if fallback_keys is not None else int(q)
                 pad = torch.full(
                     (K_eff - n_real,),
-                    int(q),
+                    fallback,
                     device=q_search.device,
                     dtype=torch.long,
                 )

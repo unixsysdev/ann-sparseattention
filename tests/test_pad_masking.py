@@ -25,6 +25,7 @@ import torch.nn.functional as F
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from inference import _exact_topk_search  # noqa: E402
+from inference import _normalize_key_mask  # noqa: E402
 from model import (  # noqa: E402
     contrastive_loss_layer,
     distillation_loss_layer,
@@ -158,6 +159,31 @@ def test_exact_topk_without_mask_does_hit_pad():
     print("  exact_topk masking holds even when pad keys are stress-similar  PASS")
 
 
+def test_expanded_attention_mask_normalizes_to_key_mask():
+    """HF attention modules receive an expanded [B, 1, L, L] additive mask.
+    The ANN retrieval path must collapse it back to [B, L] before indexing."""
+    B, L = 2, 8
+    real = torch.zeros(B, L, dtype=torch.long)
+    real[:, :5] = 1
+
+    causal = torch.ones(L, L, dtype=torch.bool).tril()
+    expanded = torch.full((B, 1, L, L), torch.finfo(torch.float32).min)
+    expanded[:, :, causal] = 0.0
+    expanded = expanded.masked_fill(~real[:, None, None, :].bool(), torch.finfo(torch.float32).min)
+
+    normalized = _normalize_key_mask(expanded, L)
+    assert normalized.shape == (B, L)
+    assert torch.equal(normalized, real.bool())
+
+    # The exact path should also accept the expanded mask without creating an
+    # advanced-indexed [L, K, L, L] tensor.
+    q, k, _, _ = _make_synthetic_layer(B=B, L_real=5, L_pad=3, d_search=4)
+    indices = _exact_topk_search(q, k, K=4, key_mask=expanded)
+    assert indices.shape == (B, L, 4)
+    assert (indices >= 5).sum().item() == 0
+    print("  expanded HF attention mask normalized to [B,L] key mask  PASS")
+
+
 # =============================================================================
 # entry point
 # =============================================================================
@@ -172,4 +198,6 @@ if __name__ == "__main__":
     test_exact_topk_excludes_pad_keys()
     print("test_exact_topk_without_mask_does_hit_pad (stress):")
     test_exact_topk_without_mask_does_hit_pad()
+    print("test_expanded_attention_mask_normalizes_to_key_mask:")
+    test_expanded_attention_mask_normalizes_to_key_mask()
     print("\nAll pad-masking tests passed.")
