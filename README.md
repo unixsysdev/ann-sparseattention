@@ -198,6 +198,38 @@ keeps the contribution narrow: learned projections improve retrieval fidelity
 and support standard ANN indexing; they do not yet show a clean PPL advantage
 over Quest on this slice.
 
+Paired 32-batch NLL evaluation gives a sharper comparison:
+
+| K | full PPL | learned PPL | Quest PPL | learned - Quest NLL delta (95% bootstrap CI) | Read |
+|---|---:|---:|---:|---:|---|
+| 128 | 28.03 | 28.07 | 28.01 | +0.00205 `[+0.00160, +0.00251]` | Quest slightly better |
+| 256 | 28.03 | 28.04 | 28.04 | -0.00005 `[-0.00029, +0.00018]` | statistical tie |
+
+So the current clean result is: learned search has higher teacher-attention
+mass, but PPL is either tied with Quest (K=256) or slightly worse (K=128) on
+this paired WikiText slice. The paper claim should be "retrieval-fidelity and
+ANN-compatibility advantages," not "PPL advantage over Quest."
+
+### Clean FAISS-vs-exact check
+
+The first block-causal FAISS prototype used one global index followed by
+segment filtering, which produced pathological filler rates after filtering.
+The current FAISS path builds per-segment indexes when a 4D block-causal mask
+is present. With that fix, CPU FAISS/HNSW tracks exact learned search on the
+same 16-batch clean eval slice:
+
+| Method | K | PPL | PPL gap | FAISS filler rate |
+|---|---:|---:|---:|---:|
+| learned exact | 128 | 30.47 | +0.07% | n/a |
+| learned FAISS/HNSW | 128 | 30.47 | +0.09% | 0.447 |
+| learned exact | 256 | 30.45 | +0.01% | n/a |
+| learned FAISS/HNSW | 256 | 30.46 | +0.04% | 0.683 |
+
+The remaining filler rate is expected for short same-segment prefixes where
+fewer than K valid causal keys exist; filler slots are masked out of the sparse
+attention softmax. This demonstrates off-the-shelf ANN compatibility in the
+clean block-causal setting, but not production wall-clock speedup.
+
 ### Compute / quality knobs (FLOP-counted)
 
 `L = 4096`. Compute reduction is the attention scoring step, `≈ L / K`.
