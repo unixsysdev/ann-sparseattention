@@ -105,6 +105,11 @@ packed eval slice. The CPU FAISS prototype still needs a proper causal
 variable-K implementation; its current over-fetch/filter/fill path produces
 high self-fill at large K and should not be used for high-K quality claims.
 
+A second exact sweep on the next 16 packed eval batches (`--skip-batches 16`)
+preserved the shape: K=128 -8.78%, K=256 -7.59%, K=512 -6.21%. This is still
+not a substitute for confidence intervals, but it reduces the chance that the
+large negative gap is a single-slice accident.
+
 ### Compute / quality knobs (FLOP-counted)
 
 `L = 4096`. Compute reduction is the attention scoring step, `≈ L / K`.
