@@ -101,6 +101,12 @@ def main():
     K_max = max(K_values)
 
     cfg = Config()
+    ckpt = torch.load(args.ckpt, map_location="cpu", weights_only=False)
+    ckpt_cfg = ckpt.get("config", {})
+    for key, value in ckpt_cfg.items():
+        if hasattr(cfg, key):
+            setattr(cfg, key, value)
+
     print(f"Loading {cfg.base_model_name} ...")
     tokenizer = AutoTokenizer.from_pretrained(cfg.base_model_name)
     base = AutoModelForCausalLM.from_pretrained(
@@ -125,7 +131,6 @@ def main():
         use_mlp=cfg.use_mlp_proj,
     ).to(base.device).to(torch.bfloat16)
 
-    ckpt = torch.load(args.ckpt, map_location="cpu", weights_only=False)
     search.load_state_dict(ckpt["search_module"])
     search.eval()
     print(f"Loaded ckpt step {ckpt['step']} for layers {layers_to_train}")

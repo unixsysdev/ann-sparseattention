@@ -570,8 +570,11 @@ if __name__ == "__main__":
         make_headline_config,
         make_headline_d128_config,
         make_pilot_d64_clean_config,
+        make_pilot_d64_packed_config,
         make_pilot_d128_config,
+        make_pilot_d128_packed_config,
         make_pilot_d256_config,
+        make_pilot_d256_packed_config,
     )
 
     parser = argparse.ArgumentParser()
@@ -581,8 +584,11 @@ if __name__ == "__main__":
         choices=[
             "pilot",
             "pilot_d64_clean",
+            "pilot_d64_packed",
             "pilot_d128",
+            "pilot_d128_packed",
             "pilot_d256",
+            "pilot_d256_packed",
             "headline_d64",
             "headline_d128",
         ],
@@ -594,10 +600,16 @@ if __name__ == "__main__":
         cfg = Config()
     elif args.config == "pilot_d64_clean":
         cfg = make_pilot_d64_clean_config()
+    elif args.config == "pilot_d64_packed":
+        cfg = make_pilot_d64_packed_config()
     elif args.config == "pilot_d128":
         cfg = make_pilot_d128_config()
+    elif args.config == "pilot_d128_packed":
+        cfg = make_pilot_d128_packed_config()
     elif args.config == "pilot_d256":
         cfg = make_pilot_d256_config()
+    elif args.config == "pilot_d256_packed":
+        cfg = make_pilot_d256_packed_config()
     elif args.config == "headline_d64":
         cfg = make_headline_config()
     elif args.config == "headline_d128":

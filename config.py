@@ -157,6 +157,20 @@ def make_pilot_d64_clean_config() -> Config:
     return cfg
 
 
+def make_pilot_d64_packed_config() -> Config:
+    """
+    Packed d=64 ablation. This reproduces the original high-density pilot
+    regime for fast d_search comparison. Known caveat: packed examples do not
+    get a true block-causal segment mask in the default HF forward path.
+    """
+    cfg = Config()
+    cfg.d_search = 64
+    cfg.sequence_packing = True
+    cfg.wandb_run_name = "pilot-d64-packed"
+    cfg.checkpoint_dir = "/tmp/checkpoints_packed_d64"
+    return cfg
+
+
 def make_pilot_d128_config() -> Config:
     """d_search=128 capacity ablation. Same training budget as the pilot."""
     cfg = Config()
@@ -166,12 +180,30 @@ def make_pilot_d128_config() -> Config:
     return cfg
 
 
+def make_pilot_d128_packed_config() -> Config:
+    """Packed d_search=128 capacity ablation."""
+    cfg = make_pilot_d64_packed_config()
+    cfg.d_search = 128
+    cfg.wandb_run_name = "pilot-d128-packed"
+    cfg.checkpoint_dir = "/tmp/checkpoints_packed_d128"
+    return cfg
+
+
 def make_pilot_d256_config() -> Config:
     """d_search=256 capacity ablation. Same training budget as the pilot."""
     cfg = Config()
     cfg.d_search = 256
     cfg.wandb_run_name = "pilot-d256"
     cfg.checkpoint_dir = "/tmp/checkpoints_d256"
+    return cfg
+
+
+def make_pilot_d256_packed_config() -> Config:
+    """Packed d_search=256 capacity ablation."""
+    cfg = make_pilot_d64_packed_config()
+    cfg.d_search = 256
+    cfg.wandb_run_name = "pilot-d256-packed"
+    cfg.checkpoint_dir = "/tmp/checkpoints_packed_d256"
     return cfg
 
 
