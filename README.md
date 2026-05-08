@@ -163,6 +163,36 @@ slightly exceed raw-QK retrieval across the set. The deployment hypothesis for
 the next run is therefore "substitute all tested layers" rather than "keep early
 layers as full attention," pending a broader all-layer run.
 
+### Quest-style page baseline (clean block-causal)
+
+`quest_sweep.py` implements a Quest-style min/max page selector for comparison:
+page size 16, native post-RoPE Q/K, same block-causal token eligibility mask,
+and the same sparse-attention gather path. This is a correctness baseline, not
+an optimized Quest runtime.
+
+```bash
+python quest_sweep.py \
+  --ckpt /tmp/checkpoints_block_d128/search_step_1000.pt \
+  --K 128,256,512 \
+  --page-size 16
+```
+
+On the same 16-batch block-causal eval slice:
+
+| Method | K | Recall@K | mass@K | PPL | PPL gap |
+|---|---:|---:|---:|---:|---:|
+| learned search exact | 128 | 0.744 | 0.787 | 30.47 | +0.07% |
+| Quest-style page | 128 | 0.669 | 0.727 | 30.41 | -0.11% |
+| learned search exact | 256 | 0.879 | 0.953 | 30.45 | +0.01% |
+| Quest-style page | 256 | 0.838 | 0.909 | 30.45 | +0.03% |
+
+Both methods are effectively full-attention parity on PPL. The learned search
+space recovers more teacher attention mass at the same token budget, especially
+at K=128, while Quest remains a strong non-trained heuristic baseline. This
+keeps the contribution narrow: learned projections improve retrieval fidelity
+and support standard ANN indexing; they do not yet show a clean PPL advantage
+over Quest on this slice.
+
 ### Compute / quality knobs (FLOP-counted)
 
 `L = 4096`. Compute reduction is the attention scoring step, `≈ L / K`.
