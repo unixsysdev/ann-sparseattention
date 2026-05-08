@@ -46,6 +46,15 @@ from model import (  # noqa: E402
 )
 
 
+def config_from_checkpoint(ckpt: dict) -> Config:
+    cfg = Config()
+    ckpt_cfg = ckpt.get("config", {})
+    for key, value in ckpt_cfg.items():
+        if hasattr(cfg, key):
+            setattr(cfg, key, value)
+    return cfg
+
+
 def _causal_topk(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -100,12 +109,8 @@ def main():
     K_values = tuple(int(x) for x in args.K.split(","))
     K_max = max(K_values)
 
-    cfg = Config()
     ckpt = torch.load(args.ckpt, map_location="cpu", weights_only=False)
-    ckpt_cfg = ckpt.get("config", {})
-    for key, value in ckpt_cfg.items():
-        if hasattr(cfg, key):
-            setattr(cfg, key, value)
+    cfg = config_from_checkpoint(ckpt)
 
     print(f"Loading {cfg.base_model_name} ...")
     tokenizer = AutoTokenizer.from_pretrained(cfg.base_model_name)
