@@ -141,6 +141,37 @@ def make_headline_config() -> Config:
     return cfg
 
 
+def make_pilot_d64_clean_config() -> Config:
+    """
+    Pilot rerun with packing off and the post-packing-fix data path.
+    Identical to the original pilot otherwise: 6 layers, d=64, 2K steps.
+    Used as the baseline for the d_search ablation.
+    """
+    cfg = Config()
+    cfg.d_search = 64
+    cfg.wandb_run_name = "pilot-d64-clean"
+    cfg.checkpoint_dir = "/tmp/checkpoints_d64"
+    return cfg
+
+
+def make_pilot_d128_config() -> Config:
+    """d_search=128 capacity ablation. Same training budget as the pilot."""
+    cfg = Config()
+    cfg.d_search = 128
+    cfg.wandb_run_name = "pilot-d128"
+    cfg.checkpoint_dir = "/tmp/checkpoints_d128"
+    return cfg
+
+
+def make_pilot_d256_config() -> Config:
+    """d_search=256 capacity ablation. Same training budget as the pilot."""
+    cfg = Config()
+    cfg.d_search = 256
+    cfg.wandb_run_name = "pilot-d256"
+    cfg.checkpoint_dir = "/tmp/checkpoints_d256"
+    return cfg
+
+
 def make_headline_d128_config() -> Config:
     """
     Capacity ablation: same as headline but d_search=128.

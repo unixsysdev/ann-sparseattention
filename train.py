@@ -563,19 +563,38 @@ def train(config: Config):
 if __name__ == "__main__":
     import argparse
 
-    from config import make_headline_config, make_headline_d128_config
+    from config import (
+        make_headline_config,
+        make_headline_d128_config,
+        make_pilot_d64_clean_config,
+        make_pilot_d128_config,
+        make_pilot_d256_config,
+    )
 
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--config",
         default="pilot",
-        choices=["pilot", "headline_d64", "headline_d128"],
+        choices=[
+            "pilot",
+            "pilot_d64_clean",
+            "pilot_d128",
+            "pilot_d256",
+            "headline_d64",
+            "headline_d128",
+        ],
         help="Which preset config to use.",
     )
     args = parser.parse_args()
 
     if args.config == "pilot":
         cfg = Config()
+    elif args.config == "pilot_d64_clean":
+        cfg = make_pilot_d64_clean_config()
+    elif args.config == "pilot_d128":
+        cfg = make_pilot_d128_config()
+    elif args.config == "pilot_d256":
+        cfg = make_pilot_d256_config()
     elif args.config == "headline_d64":
         cfg = make_headline_config()
     elif args.config == "headline_d128":
