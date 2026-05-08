@@ -208,7 +208,7 @@ def main():
     print(f"\n{'='*72}")
     print(f"mass@K — fraction of teacher attention captured by retrieval set")
     print(f"  raw_qk : exact top-K over head-mean-aggregated post-RoPE Q,K")
-    print(f"  learned: exact top-K over trained search projections (d=64)")
+    print(f"  learned: exact top-K over trained search projections (d={cfg.d_search})")
     print(f"{'='*72}\n")
     print(f"{'K':>4}  {'method':<10} " + " ".join(f"L{l:02d}" for l in layers_to_train) + "   avg")
     for K in K_values:

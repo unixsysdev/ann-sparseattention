@@ -14,6 +14,7 @@ from config import (  # noqa: E402
     make_pilot_d256_packed_config,
 )
 from data import LongContextPackedDataset  # noqa: E402
+from k_sweep import config_from_checkpoint as k_sweep_config_from_checkpoint  # noqa: E402
 
 
 def test_packed_ablation_configs_are_dense_and_comparable():
@@ -64,3 +65,8 @@ def test_compare_retrieval_uses_checkpoint_d_search():
     assert cfg.d_search == 256
     assert cfg.sequence_packing is True
     assert cfg.checkpoint_dir == "/tmp/checkpoints_packed_d256"
+
+    k_cfg = k_sweep_config_from_checkpoint(ckpt)
+    assert k_cfg.d_search == 256
+    assert k_cfg.sequence_packing is True
+    assert k_cfg.checkpoint_dir == "/tmp/checkpoints_packed_d256"

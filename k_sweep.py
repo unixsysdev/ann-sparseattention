@@ -37,8 +37,18 @@ from model import (  # noqa: E402
 )
 
 
-def k_sweep(ckpt_path: str, K_values=(16, 32, 64, 128, 256, 512), num_batches: int = 16):
+def config_from_checkpoint(ckpt: dict) -> Config:
     cfg = Config()
+    ckpt_cfg = ckpt.get("config", {})
+    for key, value in ckpt_cfg.items():
+        if hasattr(cfg, key):
+            setattr(cfg, key, value)
+    return cfg
+
+
+def k_sweep(ckpt_path: str, K_values=(16, 32, 64, 128, 256, 512), num_batches: int = 16):
+    ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+    cfg = config_from_checkpoint(ckpt)
 
     print(f"Loading base model {cfg.base_model_name} ...")
     tokenizer = AutoTokenizer.from_pretrained(cfg.base_model_name)
@@ -64,7 +74,6 @@ def k_sweep(ckpt_path: str, K_values=(16, 32, 64, 128, 256, 512), num_batches: i
         use_mlp=cfg.use_mlp_proj,
     ).to(base_model.device).to(torch.bfloat16)
 
-    ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
     search.load_state_dict(ckpt["search_module"])
     search.eval()
     print(f"Loaded ckpt step {ckpt['step']}")
