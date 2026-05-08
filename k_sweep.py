@@ -46,9 +46,16 @@ def config_from_checkpoint(ckpt: dict) -> Config:
     return cfg
 
 
-def k_sweep(ckpt_path: str, K_values=(16, 32, 64, 128, 256, 512), num_batches: int = 16):
+def k_sweep(
+    ckpt_path: str,
+    K_values=(16, 32, 64, 128, 256, 512),
+    num_batches: int = 16,
+    use_faiss: bool = None,
+):
     ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
     cfg = config_from_checkpoint(ckpt)
+    if use_faiss is None:
+        use_faiss = cfg.use_faiss_hnsw_at_eval
 
     print(f"Loading base model {cfg.base_model_name} ...")
     tokenizer = AutoTokenizer.from_pretrained(cfg.base_model_name)
@@ -156,8 +163,8 @@ def k_sweep(ckpt_path: str, K_values=(16, 32, 64, 128, 256, 512), num_batches: i
             search,
             layers_to_train,
             K_retrieve=K,
-            use_faiss=cfg.use_faiss_hnsw_at_eval,
-            use_hnsw=cfg.use_faiss_hnsw_at_eval,
+            use_faiss=use_faiss,
+            use_hnsw=use_faiss,
             hnsw_M=cfg.faiss_hnsw_M,
             hnsw_ef_construction=cfg.faiss_hnsw_ef_construction,
             hnsw_ef_search=cfg.faiss_hnsw_ef_search,
@@ -221,9 +228,20 @@ def main():
         "--K", default="16,32,64,128,256,512",
         help="Comma-separated list of K values"
     )
+    parser.add_argument(
+        "--use-faiss",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Use FAISS/HNSW retrieval. Defaults to the checkpoint config.",
+    )
     args = parser.parse_args()
     K_values = tuple(int(x) for x in args.K.split(","))
-    k_sweep(args.ckpt, K_values=K_values, num_batches=args.num_batches)
+    k_sweep(
+        args.ckpt,
+        K_values=K_values,
+        num_batches=args.num_batches,
+        use_faiss=args.use_faiss,
+    )
 
 
 if __name__ == "__main__":
