@@ -50,6 +50,7 @@ def k_sweep(
     ckpt_path: str,
     K_values=(16, 32, 64, 128, 256, 512),
     num_batches: int = 16,
+    skip_batches: int = 0,
     use_faiss: bool = None,
 ):
     ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
@@ -89,7 +90,15 @@ def k_sweep(
         base_model, layers_to_train, qk_reconstruction=cfg.qk_reconstruction
     )
 
-    eval_data = list(build_eval_data(tokenizer, cfg, num_batches=num_batches))
+    eval_data_all = list(
+        build_eval_data(tokenizer, cfg, num_batches=num_batches + skip_batches)
+    )
+    eval_data = eval_data_all[skip_batches:]
+    if len(eval_data) < num_batches:
+        print(
+            f"[warn] requested {num_batches} eval batches after skipping "
+            f"{skip_batches}, got {len(eval_data)}"
+        )
 
     # Precompute teacher attention + search outputs once per batch.
     # Cache attention_mask + position_ids alongside the activations so every
@@ -214,7 +223,8 @@ def k_sweep(
             )
 
     suffix = "faiss" if use_faiss else "exact"
-    out_path = os.path.splitext(ckpt_path)[0] + f".k_sweep_{suffix}.json"
+    skip_tag = f"_skip{skip_batches}" if skip_batches else ""
+    out_path = os.path.splitext(ckpt_path)[0] + f".k_sweep_{suffix}{skip_tag}.json"
     with open(out_path, "w") as f:
         json.dump(results, f, indent=2)
     print(f"\nWrote {out_path}")
@@ -225,6 +235,12 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--ckpt", required=True)
     parser.add_argument("--num-batches", type=int, default=16)
+    parser.add_argument(
+        "--skip-batches",
+        type=int,
+        default=0,
+        help="Skip this many eval batches before collecting num-batches.",
+    )
     parser.add_argument(
         "--K", default="16,32,64,128,256,512",
         help="Comma-separated list of K values"
@@ -241,6 +257,7 @@ def main():
         args.ckpt,
         K_values=K_values,
         num_batches=args.num_batches,
+        skip_batches=args.skip_batches,
         use_faiss=args.use_faiss,
     )
 
