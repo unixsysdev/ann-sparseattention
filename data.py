@@ -21,8 +21,9 @@ class LongContextPackedDataset(IterableDataset):
 
     Output per item:
         input_ids:      [seq_len]
-        attention_mask: [seq_len]  (all 1s — packing handled via position_ids)
+        attention_mask: [seq_len]  (1 = real token, 0 = pad)
         position_ids:   [seq_len]  (resets to 0 at each packed example boundary)
+        segment_ids:    [seq_len]  (document id inside packed chunk, -1 = pad)
     """
 
     def __init__(
@@ -120,10 +121,14 @@ class LongContextPackedDataset(IterableDataset):
     ) -> Dict[str, torch.Tensor]:
         L = self.seq_len
         position_ids = torch.zeros(L, dtype=torch.long)
+        segment_ids = torch.full((L,), -1, dtype=torch.long)
         sorted_b = sorted(set(b for b in boundaries if 0 <= b < L))
         for i, start in enumerate(sorted_b):
             end = sorted_b[i + 1] if i + 1 < len(sorted_b) else L
+            if content_len is not None:
+                end = min(end, content_len)
             position_ids[start:end] = torch.arange(end - start, dtype=torch.long)
+            segment_ids[start:end] = i
 
         attention_mask = torch.ones(L, dtype=torch.long)
         if content_len is not None and content_len < L:
@@ -133,7 +138,49 @@ class LongContextPackedDataset(IterableDataset):
             "input_ids": torch.tensor(ids, dtype=torch.long),
             "attention_mask": attention_mask,
             "position_ids": position_ids,
+            "segment_ids": segment_ids,
         }
+
+
+def build_segment_causal_mask(segment_ids: torch.Tensor) -> torch.Tensor:
+    """
+    segment_ids: [B, L], with -1 marking padding.
+    Returns [B, L, L] bool mask where True means key k is visible to query q:
+    same segment, non-pad, and k <= q.
+    """
+    B, L = segment_ids.shape
+    device = segment_ids.device
+    same_seg = segment_ids.unsqueeze(2) == segment_ids.unsqueeze(1)
+    non_pad = segment_ids.ne(-1)
+    valid = non_pad.unsqueeze(2) & non_pad.unsqueeze(1)
+    causal = torch.ones(L, L, device=device, dtype=torch.bool).tril()
+    return same_seg & valid & causal
+
+
+def build_block_causal_mask(
+    segment_ids: torch.Tensor,
+    dtype: torch.dtype = torch.bfloat16,
+) -> torch.Tensor:
+    """
+    Build a HF/SDPA-compatible additive [B, 1, L, L] attention mask from
+    packed-document segment ids. Entries are 0 where attention is allowed and
+    dtype min where attention is blocked.
+    """
+    allowed = build_segment_causal_mask(segment_ids)
+    zero = torch.zeros((), dtype=dtype, device=segment_ids.device)
+    blocked = torch.full((), torch.finfo(dtype).min, dtype=dtype, device=segment_ids.device)
+    return torch.where(allowed, zero, blocked).unsqueeze(1)
+
+
+def model_attention_mask(
+    attention_mask: torch.Tensor,
+    segment_ids: torch.Tensor = None,
+    block_causal_mask: bool = False,
+    dtype: torch.dtype = torch.bfloat16,
+) -> torch.Tensor:
+    if block_causal_mask and segment_ids is not None:
+        return build_block_causal_mask(segment_ids, dtype=dtype)
+    return attention_mask
 
 
 def build_long_context_dataloader(

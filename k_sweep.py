@@ -22,7 +22,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from config import Config  # noqa: E402
-from data import build_eval_data  # noqa: E402
+from data import build_eval_data, model_attention_mask  # noqa: E402
 from eval import (  # noqa: E402
     _per_position_mass_at_k,
     _per_position_recall,
@@ -111,23 +111,47 @@ def k_sweep(
         attention_mask = batch.get("attention_mask")
         if attention_mask is not None:
             attention_mask = attention_mask.to(base_model.device)
+        segment_ids = batch.get("segment_ids")
+        if segment_ids is not None:
+            segment_ids = segment_ids.to(base_model.device)
         position_ids = batch.get("position_ids")
         if position_ids is not None:
             position_ids = position_ids.to(base_model.device)
+        model_mask = model_attention_mask(
+            attention_mask,
+            segment_ids,
+            block_causal_mask=getattr(cfg, "block_causal_mask", False),
+            dtype=base_model.dtype,
+        )
+        allowed_mask = model_mask[:, 0] >= 0 if model_mask is not None and model_mask.dim() == 4 else None
         h_dict, w_dict = capture.run(
-            input_ids, attention_mask=attention_mask, position_ids=position_ids
+            input_ids, attention_mask=model_mask, position_ids=position_ids
         )
         with torch.no_grad():
             q_dict, k_dict = search(h_dict)
         cached.append(
-            (input_ids, attention_mask, position_ids, h_dict, w_dict, q_dict, k_dict)
+            (
+                input_ids,
+                attention_mask,
+                model_mask,
+                allowed_mask,
+                position_ids,
+                h_dict,
+                w_dict,
+                q_dict,
+                k_dict,
+            )
         )
 
     # Reference full-attention PPL (computed once, not per K).
     print("Computing full-attention PPL...")
     full_ppls = []
-    for input_ids, attn_m, pos_ids, *_ in cached:
-        full_ppls.append(compute_perplexity(base_model, input_ids, attn_m, pos_ids))
+    for input_ids, token_m, model_m, _allowed_m, pos_ids, *_ in cached:
+        full_ppls.append(
+            compute_perplexity(
+                base_model, input_ids, model_m, pos_ids, target_mask=token_m
+            )
+        )
     ppl_full = sum(full_ppls) / len(full_ppls)
     print(f"  ppl_full = {ppl_full:.4f}")
 
@@ -138,20 +162,30 @@ def k_sweep(
         # Recall@K + mass@K (using cached captures)
         per_layer_recall = {idx: [] for idx in layers_to_train}
         per_layer_mass = {idx: [] for idx in layers_to_train}
-        for input_ids, attn_m, pos_ids, h_dict, w_dict, q_dict, k_dict in cached:
+        for input_ids, token_m, model_m, allowed_m, pos_ids, h_dict, w_dict, q_dict, k_dict in cached:
             for idx in layers_to_train:
                 teacher_full = w_dict[idx]   # [B, H, L, L]
                 teacher = aggregate_heads(
                     teacher_full, mode=cfg.teacher_head_aggregation
                 )
-                rec = _per_position_recall(teacher, q_dict[idx], k_dict[idx], K)
+                rec = _per_position_recall(
+                    teacher,
+                    q_dict[idx],
+                    k_dict[idx],
+                    K,
+                    attention_allowed_mask=allowed_m,
+                )
                 B, L = rec.shape
                 pos = torch.arange(L, device=rec.device).unsqueeze(0).expand(B, L)
                 mask = pos >= K
                 per_layer_recall[idx].extend(rec.masked_select(mask).tolist())
 
                 _, mass = _per_position_mass_at_k(
-                    teacher_full, q_dict[idx], k_dict[idx], K
+                    teacher_full,
+                    q_dict[idx],
+                    k_dict[idx],
+                    K,
+                    attention_allowed_mask=allowed_m,
                 )
                 per_layer_mass[idx].extend(mass.masked_select(mask).tolist())
 
@@ -181,8 +215,10 @@ def k_sweep(
         try:
             inference.FAISS_STATS.clear()
             ann_ppls = [
-                compute_perplexity(base_model, ids, attn_m, pos_ids)
-                for ids, attn_m, pos_ids, *_ in cached
+                compute_perplexity(
+                    base_model, ids, model_m, pos_ids, target_mask=token_m
+                )
+                for ids, token_m, model_m, _allowed_m, pos_ids, *_ in cached
             ]
         finally:
             uninstall_ann_attention(wrappers)

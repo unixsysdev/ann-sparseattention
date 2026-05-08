@@ -31,7 +31,11 @@ from torch.optim.lr_scheduler import LambdaLR
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from config import Config
-from data import build_long_context_dataloader
+from data import (
+    build_long_context_dataloader,
+    build_segment_causal_mask,
+    model_attention_mask,
+)
 from eval import evaluate
 from model import (
     FrozenForwardCapture,
@@ -484,13 +488,27 @@ def train(config: Config):
             attention_mask = batch.get("attention_mask")
             if attention_mask is not None:
                 attention_mask = attention_mask.to(base_model.device)
+            segment_ids = batch.get("segment_ids")
+            if segment_ids is not None:
+                segment_ids = segment_ids.to(base_model.device)
             position_ids = batch.get("position_ids")
             if position_ids is not None:
                 position_ids = position_ids.to(base_model.device)
+            model_mask = model_attention_mask(
+                attention_mask,
+                segment_ids,
+                block_causal_mask=getattr(config, "block_causal_mask", False),
+                dtype=base_model.dtype,
+            )
+            allowed_mask = (
+                build_segment_causal_mask(segment_ids)
+                if getattr(config, "block_causal_mask", False) and segment_ids is not None
+                else None
+            )
 
             try:
                 hidden_states_dict, attn_weights_dict = capture.run(
-                    input_ids, attention_mask, position_ids=position_ids
+                    input_ids, model_mask, position_ids=position_ids
                 )
             except Exception as e:
                 print(f"[step {step}] Forward capture failed: {e}")
@@ -512,6 +530,7 @@ def train(config: Config):
             loss, log_dict = total_loss(
                 q_dict, k_dict, attn_weights_dict, config,
                 attention_mask=attention_mask,
+                attention_allowed_mask=allowed_mask,
             )
 
             loss = loss / config.gradient_accumulation_steps
@@ -572,6 +591,7 @@ if __name__ == "__main__":
         make_pilot_d64_clean_config,
         make_pilot_d64_packed_config,
         make_pilot_d128_config,
+        make_pilot_d128_block_config,
         make_pilot_d128_packed_config,
         make_pilot_d256_config,
         make_pilot_d256_packed_config,
@@ -586,6 +606,7 @@ if __name__ == "__main__":
             "pilot_d64_clean",
             "pilot_d64_packed",
             "pilot_d128",
+            "pilot_d128_block",
             "pilot_d128_packed",
             "pilot_d256",
             "pilot_d256_packed",
@@ -604,6 +625,8 @@ if __name__ == "__main__":
         cfg = make_pilot_d64_packed_config()
     elif args.config == "pilot_d128":
         cfg = make_pilot_d128_config()
+    elif args.config == "pilot_d128_block":
+        cfg = make_pilot_d128_block_config()
     elif args.config == "pilot_d128_packed":
         cfg = make_pilot_d128_packed_config()
     elif args.config == "pilot_d256":

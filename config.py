@@ -102,6 +102,8 @@ class Config:
                                     # default forward doesn't build for us.
                                     # Off = correct; on = faster but leaks
                                     # attention across packed boundaries.
+    block_causal_mask: bool = False  # when packing, isolate packed documents
+                                     # with segment-level causal attention.
     num_workers: int = 4
     prefetch_factor: int = 4
 
@@ -186,6 +188,15 @@ def make_pilot_d128_packed_config() -> Config:
     cfg.d_search = 128
     cfg.wandb_run_name = "pilot-d128-packed"
     cfg.checkpoint_dir = "/tmp/checkpoints_packed_d128"
+    return cfg
+
+
+def make_pilot_d128_block_config() -> Config:
+    """Packed d=128 with segment-level block-causal masking (clean path)."""
+    cfg = make_pilot_d128_packed_config()
+    cfg.block_causal_mask = True
+    cfg.wandb_run_name = "pilot-d128-block-causal"
+    cfg.checkpoint_dir = "/tmp/checkpoints_block_d128"
     return cfg
 
 

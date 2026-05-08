@@ -26,6 +26,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from inference import _exact_topk_search  # noqa: E402
 from inference import _normalize_key_mask  # noqa: E402
+from data import build_block_causal_mask  # noqa: E402
 from model import (  # noqa: E402
     contrastive_loss_layer,
     distillation_loss_layer,
@@ -184,6 +185,40 @@ def test_expanded_attention_mask_normalizes_to_key_mask():
     print("  expanded HF attention mask normalized to [B,L] key mask  PASS")
 
 
+def test_exact_topk_respects_block_causal_mask():
+    B, L, d = 1, 8, 4
+    q = torch.randn(B, L, d, generator=torch.Generator().manual_seed(0))
+    k = q.clone()
+    # Make segment-0 keys very attractive to segment-1 queries. The block mask
+    # must still prevent retrieval across the segment boundary.
+    k[:, :4] = q[:, 7:8] * 100
+    segment_ids = torch.tensor([[0, 0, 0, 0, 1, 1, 1, 1]])
+    block_mask = build_block_causal_mask(segment_ids, dtype=torch.float32)
+    indices = _exact_topk_search(q, k, K=4, key_mask=block_mask)
+    assert (indices[:, 4:] < 4).sum().item() == 0
+    print("  exact_topk respects block-causal segment mask  PASS")
+
+
+def test_loss_respects_block_causal_mask():
+    B, L, d = 1, 8, 4
+    g = torch.Generator().manual_seed(1)
+    q = torch.randn(B, L, d, generator=g)
+    k = torch.randn(B, L, d, generator=g)
+    teacher = torch.ones(B, L, L).tril()
+    teacher = teacher / teacher.sum(-1, keepdim=True)
+    segment_ids = torch.tensor([[0, 0, 0, 0, 1, 1, 1, 1]])
+    allowed = build_block_causal_mask(segment_ids, dtype=torch.float32)[:, 0] >= 0
+
+    loss_block, _ = contrastive_loss_layer(
+        q, k, teacher, K_pos=2, tau=0.07, attention_allowed_mask=allowed
+    )
+    loss_global, _ = contrastive_loss_layer(q, k, teacher, K_pos=2, tau=0.07)
+
+    assert torch.isfinite(loss_block)
+    assert not torch.allclose(loss_block, loss_global, atol=1e-4)
+    print("  contrastive loss respects block-causal segment mask  PASS")
+
+
 # =============================================================================
 # entry point
 # =============================================================================
@@ -200,4 +235,8 @@ if __name__ == "__main__":
     test_exact_topk_without_mask_does_hit_pad()
     print("test_expanded_attention_mask_normalizes_to_key_mask:")
     test_expanded_attention_mask_normalizes_to_key_mask()
+    print("test_exact_topk_respects_block_causal_mask:")
+    test_exact_topk_respects_block_causal_mask()
+    print("test_loss_respects_block_causal_mask:")
+    test_loss_respects_block_causal_mask()
     print("\nAll pad-masking tests passed.")

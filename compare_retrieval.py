@@ -39,11 +39,12 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from config import Config  # noqa: E402
-from data import build_eval_data  # noqa: E402
+from data import build_eval_data, model_attention_mask  # noqa: E402
 from model import (  # noqa: E402
     FrozenForwardCapture,
     SearchProjectionModule,
 )
+from inference import _normalize_allowed_mask, _normalize_key_mask  # noqa: E402
 
 
 def config_from_checkpoint(ckpt: dict) -> Config:
@@ -66,10 +67,16 @@ def _causal_topk(
     """
     B, L, _ = q.shape
     sim = torch.bmm(q, k.transpose(1, 2))
-    mask = torch.ones(L, L, device=sim.device, dtype=torch.bool).tril()
-    sim = sim.masked_fill(~mask, -1e9)
+    allowed = _normalize_allowed_mask(key_mask, L) if key_mask is not None else None
+    if allowed is None:
+        mask = torch.ones(L, L, device=sim.device, dtype=torch.bool).tril()
+        sim = sim.masked_fill(~mask, -1e9)
+    else:
+        sim = sim.masked_fill(~allowed, -1e9)
     if key_mask is not None:
-        sim = sim.masked_fill(~key_mask.unsqueeze(1).bool(), -1e9)
+        key_valid = _normalize_key_mask(key_mask, L)
+        if key_valid is not None and allowed is None:
+            sim = sim.masked_fill(~key_valid.unsqueeze(1).bool(), -1e9)
     return sim.topk(min(K, L), dim=-1).indices
 
 
@@ -155,12 +162,21 @@ def main():
         attention_mask = batch.get("attention_mask")
         if attention_mask is not None:
             attention_mask = attention_mask.to(base.device)
+        segment_ids = batch.get("segment_ids")
+        if segment_ids is not None:
+            segment_ids = segment_ids.to(base.device)
         position_ids = batch.get("position_ids")
         if position_ids is not None:
             position_ids = position_ids.to(base.device)
+        model_mask = model_attention_mask(
+            attention_mask,
+            segment_ids,
+            block_causal_mask=getattr(cfg, "block_causal_mask", False),
+            dtype=base.dtype,
+        )
 
         h_dict, w_dict = capture.run(
-            input_ids, attention_mask=attention_mask, position_ids=position_ids
+            input_ids, attention_mask=model_mask, position_ids=position_ids
         )
         with torch.no_grad():
             q_s_dict, k_s_dict = search(h_dict)
@@ -176,14 +192,14 @@ def main():
             q_agg = F.normalize(q_agg, dim=-1)
             k_agg = F.normalize(k_agg, dim=-1)
             raw_topk_full = _causal_topk(
-                q_agg, k_agg, K_max, key_mask=attention_mask
+                q_agg, k_agg, K_max, key_mask=model_mask
             )
 
             # --- Learned Q_s / K_s (already a single shared vector per token) ---
             q_s = F.normalize(q_s_dict[layer].float(), dim=-1)
             k_s = F.normalize(k_s_dict[layer].float(), dim=-1)
             learned_topk_full = _causal_topk(
-                q_s, k_s, K_max, key_mask=attention_mask
+                q_s, k_s, K_max, key_mask=model_mask
             )
 
             for K in K_values:

@@ -12,7 +12,7 @@ from typing import Dict, List, Tuple
 import torch
 import torch.nn.functional as F
 
-from data import build_eval_data
+from data import build_eval_data, model_attention_mask
 from inference import (
     install_ann_attention,
     uninstall_ann_attention,
@@ -29,6 +29,7 @@ def _per_position_mass_at_k(
     q_search: torch.Tensor,        # [B, L, d_search]
     k_search: torch.Tensor,
     K: int,
+    attention_allowed_mask: torch.Tensor = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Teacher-attention mass captured by the search top-K.
@@ -43,11 +44,11 @@ def _per_position_mass_at_k(
     """
     B, H, L, _ = teacher_full.shape
     device = q_search.device
-    causal = _causal_mask(L, device)
+    allowed = attention_allowed_mask.bool() if attention_allowed_mask is not None else _causal_mask(L, device)
 
     q_n = F.normalize(q_search, dim=-1)
     k_n = F.normalize(k_search, dim=-1)
-    sim = torch.bmm(q_n, k_n.transpose(1, 2)).masked_fill(~causal, -1e9)
+    sim = torch.bmm(q_n, k_n.transpose(1, 2)).masked_fill(~allowed, -1e9)
     K_eff = min(K, L)
     search_top = sim.topk(K_eff, dim=-1).indices                  # [B, L, K]
 
@@ -67,6 +68,7 @@ def _per_position_recall(
     q_search: torch.Tensor,  # [B, L, d_search]
     k_search: torch.Tensor,
     K: int,
+    attention_allowed_mask: torch.Tensor = None,
 ) -> torch.Tensor:
     """
     Vectorized recall@K per query position.
@@ -78,15 +80,15 @@ def _per_position_recall(
     B, L, _ = q_search.shape
     device = q_search.device
 
-    causal = _causal_mask(L, device)
-    teacher_masked = teacher.masked_fill(~causal, -1e9)
+    allowed = attention_allowed_mask.bool() if attention_allowed_mask is not None else _causal_mask(L, device)
+    teacher_masked = teacher.masked_fill(~allowed, -1e9)
 
     K_eff = min(K, L)
     teacher_top = teacher_masked.topk(K_eff, dim=-1).indices  # [B, L, K]
 
     q_n = F.normalize(q_search, dim=-1)
     k_n = F.normalize(k_search, dim=-1)
-    sim = torch.bmm(q_n, k_n.transpose(1, 2)).masked_fill(~causal, -1e9)
+    sim = torch.bmm(q_n, k_n.transpose(1, 2)).masked_fill(~allowed, -1e9)
     search_top = sim.topk(K_eff, dim=-1).indices  # [B, L, K]
 
     # Vectorized intersection size: scatter both into a [B, L, L] bool grid and AND.
@@ -96,10 +98,10 @@ def _per_position_recall(
     search_grid.scatter_(-1, search_top, True)
     inter = (teacher_grid & search_grid).sum(-1)  # [B, L]
 
-    # Denominator: min(K, q+1) — for early positions there are fewer valid keys.
-    q_pos = torch.arange(L, device=device).unsqueeze(0).expand(B, L)
+    # Denominator: min(K, number of valid keys for the query).
     denom = torch.minimum(
-        torch.full_like(q_pos, K_eff), q_pos + 1
+        torch.full((B, L), K_eff, device=device, dtype=torch.long),
+        allowed.sum(dim=-1),
     ).clamp(min=1)
     return inter.float() / denom.float()
 
@@ -109,6 +111,7 @@ def compute_perplexity(
     input_ids: torch.Tensor,
     attention_mask: torch.Tensor = None,
     position_ids: torch.Tensor = None,
+    target_mask: torch.Tensor = None,
 ) -> float:
     """
     Standard NLL averaged over tokens, exp() at the end.
@@ -131,11 +134,13 @@ def compute_perplexity(
     flat_logits = shift_logits.view(-1, shift_logits.size(-1)).float()
     flat_labels = shift_labels.view(-1)
 
-    if attention_mask is not None:
+    if target_mask is None and attention_mask is not None and attention_mask.dim() == 2:
+        target_mask = attention_mask
+    if target_mask is not None:
         # Only count tokens whose target position was real (mask==1).
-        target_mask = attention_mask[..., 1:].contiguous().view(-1).bool()
-        flat_logits = flat_logits[target_mask]
-        flat_labels = flat_labels[target_mask]
+        shifted_mask = target_mask[..., 1:].contiguous().view(-1).bool()
+        flat_logits = flat_logits[shifted_mask]
+        flat_labels = flat_labels[shifted_mask]
 
     loss = F.cross_entropy(flat_logits, flat_labels, reduction="mean")
     return float(torch.exp(loss).item())
@@ -146,8 +151,11 @@ def compute_perplexity_full_attention(
     input_ids: torch.Tensor,
     attention_mask: torch.Tensor = None,
     position_ids: torch.Tensor = None,
+    target_mask: torch.Tensor = None,
 ) -> float:
-    return compute_perplexity(base_model, input_ids, attention_mask, position_ids)
+    return compute_perplexity(
+        base_model, input_ids, attention_mask, position_ids, target_mask
+    )
 
 
 def compute_perplexity_ann_substituted(
@@ -157,6 +165,7 @@ def compute_perplexity_ann_substituted(
     config,
     attention_mask: torch.Tensor = None,
     position_ids: torch.Tensor = None,
+    target_mask: torch.Tensor = None,
     return_router_stability: bool = False,
 ) -> Tuple[float, float]:
     """
@@ -182,10 +191,12 @@ def compute_perplexity_ann_substituted(
         full_out = base_model(**fwd_kwargs)
     full_logits = full_out.logits[..., :-1, :].contiguous().view(-1, full_out.logits.size(-1)).float()
     full_labels = input_ids[..., 1:].contiguous().view(-1)
-    if attention_mask is not None:
-        target_mask = attention_mask[..., 1:].contiguous().view(-1).bool()
-        full_logits = full_logits[target_mask]
-        full_labels = full_labels[target_mask]
+    if target_mask is None and attention_mask is not None and attention_mask.dim() == 2:
+        target_mask = attention_mask
+    if target_mask is not None:
+        shifted_mask = target_mask[..., 1:].contiguous().view(-1).bool()
+        full_logits = full_logits[shifted_mask]
+        full_labels = full_labels[shifted_mask]
     ppl_full = float(torch.exp(F.cross_entropy(full_logits, full_labels, reduction="mean")))
 
     wrappers = install_ann_attention(
@@ -207,10 +218,10 @@ def compute_perplexity_ann_substituted(
 
     ann_logits = ann_out.logits[..., :-1, :].contiguous().view(-1, ann_out.logits.size(-1)).float()
     ann_labels = input_ids[..., 1:].contiguous().view(-1)
-    if attention_mask is not None:
-        target_mask = attention_mask[..., 1:].contiguous().view(-1).bool()
-        ann_logits = ann_logits[target_mask]
-        ann_labels = ann_labels[target_mask]
+    if target_mask is not None:
+        shifted_mask = target_mask[..., 1:].contiguous().view(-1).bool()
+        ann_logits = ann_logits[shifted_mask]
+        ann_labels = ann_labels[shifted_mask]
     ppl_ann = float(torch.exp(F.cross_entropy(ann_logits, ann_labels, reduction="mean")))
 
     # NOTE: we return ppl_ann separately (not gap), and pair it with the
@@ -280,13 +291,25 @@ def evaluate(base_model, search_module, capture, config, tokenizer) -> Dict:
             attention_mask = batch.get("attention_mask")
             if attention_mask is not None:
                 attention_mask = attention_mask.to(base_model.device)
+            segment_ids = batch.get("segment_ids")
+            if segment_ids is not None:
+                segment_ids = segment_ids.to(base_model.device)
             position_ids = batch.get("position_ids")
             if position_ids is not None:
                 position_ids = position_ids.to(base_model.device)
+            model_mask = model_attention_mask(
+                attention_mask,
+                segment_ids,
+                block_causal_mask=getattr(config, "block_causal_mask", False),
+                dtype=base_model.dtype,
+            )
+            allowed_mask = None
+            if model_mask is not None and model_mask.dim() == 4:
+                allowed_mask = (model_mask[:, 0] >= 0)
 
             # --- recall@K via captured teacher attention ---
             hidden_states_dict, attn_weights_dict = capture.run(
-                input_ids, attention_mask=attention_mask, position_ids=position_ids
+                input_ids, attention_mask=model_mask, position_ids=position_ids
             )
             q_dict, k_dict = search_module(hidden_states_dict)
 
@@ -297,7 +320,11 @@ def evaluate(base_model, search_module, capture, config, tokenizer) -> Dict:
                 )
                 for K in K_curve:
                     rec = _per_position_recall(
-                        teacher, q_dict[layer_idx], k_dict[layer_idx], K
+                        teacher,
+                        q_dict[layer_idx],
+                        k_dict[layer_idx],
+                        K,
+                        attention_allowed_mask=allowed_mask,
                     )  # [B, L]
                     B, L = rec.shape
                     pos = torch.arange(L, device=rec.device).unsqueeze(0).expand(B, L)
@@ -309,22 +336,27 @@ def evaluate(base_model, search_module, capture, config, tokenizer) -> Dict:
                     # the search top-K. Better than recall when softmax
                     # is sharp.
                     _, mass = _per_position_mass_at_k(
-                        teacher_full, q_dict[layer_idx], k_dict[layer_idx], K
+                        teacher_full,
+                        q_dict[layer_idx],
+                        k_dict[layer_idx],
+                        K,
+                        attention_allowed_mask=allowed_mask,
                     )  # [B, L]
                     mass_vals = mass.masked_select(mask)
                     mass_acc[layer_idx][K].extend(mass_vals.tolist())
 
             # --- end-to-end ppl + router stability ---
             ppl_full = compute_perplexity_full_attention(
-                base_model, input_ids, attention_mask, position_ids
+                base_model, input_ids, model_mask, position_ids, target_mask=attention_mask
             )
             ppl_ann, router_match = compute_perplexity_ann_substituted(
                 base_model,
                 search_module,
                 input_ids,
                 config,
-                attention_mask=attention_mask,
+                attention_mask=model_mask,
                 position_ids=position_ids,
+                target_mask=attention_mask,
                 return_router_stability=config.verify_routing_stability,
             )
             full_ppls.append(ppl_full)

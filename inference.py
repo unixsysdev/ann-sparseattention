@@ -62,24 +62,31 @@ def _exact_topk_search(
     vectors, restricted to causal (key index <= query index).
     """
     B, L, _ = q_search.shape
-    key_mask = _normalize_key_mask(key_mask, L)
+    raw_key_mask = key_mask
+    key_mask = _normalize_key_mask(raw_key_mask, L)
+    allowed_mask = _normalize_allowed_mask(raw_key_mask, L)
     q_n = F.normalize(q_search, dim=-1)
     k_n = F.normalize(k_search, dim=-1)
     sim = torch.bmm(q_n, k_n.transpose(1, 2))  # [B, L, L]
-    if causal:
+    if allowed_mask is not None:
+        sim = sim.masked_fill(~allowed_mask, -1e9)
+    elif causal:
         mask = torch.ones(L, L, device=sim.device, dtype=torch.bool).tril()
         sim = sim.masked_fill(~mask, -1e9)
-    if key_mask is not None:
+    if key_mask is not None and allowed_mask is None:
         # Block pad keys for every query.
         sim = sim.masked_fill(~key_mask.unsqueeze(1).bool(), -1e9)
     K_eff = min(K, L)
     top = sim.topk(K_eff, dim=-1).indices  # [B, L, K_eff]
     if key_mask is not None:
-        key_pos = torch.arange(L, device=sim.device).view(1, 1, L)
-        q_pos = torch.arange(L, device=sim.device).view(1, L, 1)
-        valid = key_mask[:, None, :] & ((key_pos <= q_pos) if causal else True)
+        if allowed_mask is not None:
+            valid = allowed_mask
+        else:
+            key_pos = torch.arange(L, device=sim.device).view(1, 1, L)
+            q_pos = torch.arange(L, device=sim.device).view(1, L, 1)
+            valid = key_mask[:, None, :] & ((key_pos <= q_pos) if causal else True)
         top_valid = valid.gather(-1, top)
-        fallback = _fallback_key_indices(key_mask, L).unsqueeze(-1)
+        fallback = _fallback_key_indices(key_mask, L, allowed_mask).unsqueeze(-1)
         top = torch.where(top_valid, top, fallback)
     return top
 
@@ -117,13 +124,30 @@ def _normalize_key_mask(key_mask: torch.Tensor, L: int) -> Optional[torch.Tensor
     raise ValueError(f"Unsupported key_mask shape: {tuple(key_mask.shape)}")
 
 
-def _fallback_key_indices(key_mask: torch.Tensor, L: int) -> torch.Tensor:
+def _normalize_allowed_mask(key_mask: torch.Tensor, L: int) -> Optional[torch.Tensor]:
+    """Return [B, L, L] query-key allowed mask when a 4D attention mask is supplied."""
+    if key_mask is None or key_mask.dim() != 4:
+        return None
+    km = key_mask[..., :L, :L]
+    if km.dtype == torch.bool:
+        return ~km.squeeze(1)
+    return (km >= 0).squeeze(1)
+
+
+def _fallback_key_indices(
+    key_mask: torch.Tensor,
+    L: int,
+    allowed_mask: torch.Tensor = None,
+) -> torch.Tensor:
     """For each query position, choose the latest real causal key as filler."""
     B = key_mask.shape[0]
     device = key_mask.device
     key_pos = torch.arange(L, device=device).view(1, 1, L)
-    q_pos = torch.arange(L, device=device).view(1, L, 1)
-    valid = key_mask[:, None, :] & (key_pos <= q_pos)
+    if allowed_mask is not None:
+        valid = allowed_mask
+    else:
+        q_pos = torch.arange(L, device=device).view(1, L, 1)
+        valid = key_mask[:, None, :] & (key_pos <= q_pos)
     scored = torch.where(
         valid,
         key_pos.expand(B, L, L),
@@ -163,7 +187,9 @@ def _faiss_topk_search(
         return _exact_topk_search(q_search, k_search, K, causal=causal)
 
     B, L, d = q_search.shape
-    key_mask = _normalize_key_mask(key_mask, L)
+    raw_key_mask = key_mask
+    key_mask = _normalize_key_mask(raw_key_mask, L)
+    allowed_mask = _normalize_allowed_mask(raw_key_mask, L)
     K_eff = min(K, L)
     out = torch.empty(B, L, K_eff, dtype=torch.long, device=q_search.device)
 
@@ -177,7 +203,7 @@ def _faiss_topk_search(
     # Per-batch pad mask in CPU bool form for cheap filtering inside the loop.
     if key_mask is not None:
         pad_b = (~key_mask.bool()).cpu()  # True at pad
-        fallback_keys = _fallback_key_indices(key_mask, L)
+        fallback_keys = _fallback_key_indices(key_mask, L, allowed_mask)
     else:
         pad_b = None
         fallback_keys = None
@@ -203,6 +229,10 @@ def _faiss_topk_search(
         ids_t = torch.from_numpy(ids).to(q_search.device)  # [L, over]
         q_pos = torch.arange(L, device=q_search.device).unsqueeze(-1)
         valid = ids_t <= q_pos
+        if allowed_mask is not None:
+            allowed_b = allowed_mask[b].to(q_search.device)
+            row_pos = torch.arange(L, device=q_search.device).unsqueeze(-1)
+            valid = allowed_b[row_pos, ids_t.clamp(min=0)]
         if pad_b is not None:
             # Drop retrieved positions that point at pad keys.
             pad_b_dev = pad_b[b].to(q_search.device)         # [L]

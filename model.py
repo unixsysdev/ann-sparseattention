@@ -335,7 +335,9 @@ class FrozenForwardCapture:
         # Reconstruct attention weights for Option 3.
         if self.qk_reconstruction:
             for idx, (q, k) in self._captured_qk.items():
-                self.attn_weights[idx] = _reconstruct_attn_weights(q, k)
+                self.attn_weights[idx] = _reconstruct_attn_weights(
+                    q, k, attention_mask=attention_mask
+                )
 
         return self.hidden_states, self.attn_weights
 
@@ -368,8 +370,21 @@ def _apply_rotary(
     return q_rot, k_rot
 
 
+def _attention_allowed_mask(attention_mask: Optional[torch.Tensor], L: int) -> Optional[torch.Tensor]:
+    if attention_mask is None:
+        return None
+    if attention_mask.dim() == 4:
+        m = attention_mask[..., :L, :L]
+        if m.dtype == torch.bool:
+            return ~m.squeeze(1)
+        return (m >= 0).squeeze(1)
+    return None
+
+
 def _reconstruct_attn_weights(
-    q: torch.Tensor, k: torch.Tensor
+    q: torch.Tensor,
+    k: torch.Tensor,
+    attention_mask: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """
     q: [B, H_q, L, d_head], k: [B, H_kv, L, d_head] (GQA: H_kv may divide H_q).
@@ -386,8 +401,13 @@ def _reconstruct_attn_weights(
     # fp32 for numerical stability of softmax
     scores = torch.einsum("bhqd,bhkd->bhqk", q.float(), k.float()) / math.sqrt(d_head)
     causal = torch.ones(L, L, device=q.device, dtype=torch.bool).tril()
-    scores = scores.masked_fill(~causal, float("-inf"))
-    return F.softmax(scores, dim=-1).to(q.dtype)
+    allowed = _attention_allowed_mask(attention_mask, L)
+    if allowed is not None:
+        mask = allowed.unsqueeze(1)
+    else:
+        mask = causal
+    scores = scores.masked_fill(~mask, float("-inf"))
+    return torch.nan_to_num(F.softmax(scores, dim=-1), nan=0.0).to(q.dtype)
 
 
 # =============================================================================
@@ -412,6 +432,7 @@ def contrastive_loss_layer(
     tau: float = 0.07,
     fp32: bool = True,
     query_mask: Optional[torch.Tensor] = None,
+    attention_allowed_mask: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, Dict[str, float]]:
     """
     InfoNCE with teacher-derived positives.
@@ -432,16 +453,19 @@ def contrastive_loss_layer(
 
     sim_search = torch.bmm(q_norm, k_norm.transpose(1, 2)) / tau  # [B, L, L]
 
-    causal = torch.ones(L, L, device=device, dtype=torch.bool).tril()
-    sim_masked = sim_search.masked_fill(~causal, -1e9)
-    teacher_masked = teacher_attn.masked_fill(~causal, -1e9)
+    if attention_allowed_mask is None:
+        allowed = torch.ones(L, L, device=device, dtype=torch.bool).tril()
+        allowed = allowed.unsqueeze(0).expand(B, L, L)
+    else:
+        allowed = attention_allowed_mask.bool()
+    sim_masked = sim_search.masked_fill(~allowed, -1e9)
+    teacher_masked = teacher_attn.masked_fill(~allowed, -1e9)
 
     K_eff = min(K_pos, L)
     pos_indices = teacher_masked.topk(K_eff, dim=-1).indices  # [B, L, K_eff]
 
     # A position is a valid positive if it lies in the causal window for q.
-    q_positions = torch.arange(L, device=device).view(1, L, 1)
-    valid_pos_mask = pos_indices <= q_positions  # [B, L, K_eff]
+    valid_pos_mask = allowed.gather(-1, pos_indices)  # [B, L, K_eff]
 
     pos_scores = sim_masked.gather(-1, pos_indices)  # [B, L, K_eff]
     pos_scores = pos_scores.masked_fill(~valid_pos_mask, -1e9)
@@ -452,7 +476,7 @@ def contrastive_loss_layer(
     # Skip queries that have no valid context (position 0 has only itself).
     # Also skip pad query positions if a mask is supplied — pad queries train
     # the projections on noise.
-    query_valid = torch.arange(L, device=device).unsqueeze(0).expand(B, L) > 0
+    query_valid = allowed.sum(dim=-1) > 1
     if query_mask is not None:
         query_valid = query_valid & query_mask.bool()
 
@@ -477,6 +501,7 @@ def distillation_loss_layer(
     tau: float = 1.0,
     fp32: bool = True,
     query_mask: Optional[torch.Tensor] = None,
+    attention_allowed_mask: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, Dict[str, float]]:
     """
     KL(teacher || student) over attention distributions.
@@ -490,9 +515,13 @@ def distillation_loss_layer(
     device = q_search.device
 
     sim = torch.bmm(q_search, k_search.transpose(1, 2)) / math.sqrt(d_s)
-    causal = torch.ones(L, L, device=device, dtype=torch.bool).tril()
-    sim_masked = sim.masked_fill(~causal, -1e9)
-    teacher_masked_zero = teacher_attn.masked_fill(~causal, 0.0)
+    if attention_allowed_mask is None:
+        allowed = torch.ones(L, L, device=device, dtype=torch.bool).tril()
+        allowed = allowed.unsqueeze(0).expand(B, L, L)
+    else:
+        allowed = attention_allowed_mask.bool()
+    sim_masked = sim.masked_fill(~allowed, -1e9)
+    teacher_masked_zero = teacher_attn.masked_fill(~allowed, 0.0)
 
     teacher_dist = teacher_masked_zero / (
         teacher_masked_zero.sum(-1, keepdim=True) + 1e-9
@@ -503,7 +532,7 @@ def distillation_loss_layer(
     teacher_log = torch.log(teacher_dist + eps)
     kl_per_token = (teacher_dist * (teacher_log - student_log_dist)).sum(-1)
 
-    query_valid = torch.arange(L, device=device).unsqueeze(0).expand(B, L) > 0
+    query_valid = allowed.sum(dim=-1) > 1
     if query_mask is not None:
         query_valid = query_valid & query_mask.bool()
     loss = kl_per_token.masked_select(query_valid).mean()
@@ -517,6 +546,7 @@ def total_loss(
     teacher_attn_dict: Dict[int, torch.Tensor],
     config,
     attention_mask: Optional[torch.Tensor] = None,
+    attention_allowed_mask: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, Dict]:
     """Sum losses across layers, return total + per-layer diagnostics.
 
@@ -538,6 +568,7 @@ def total_loss(
             tau=config.tau_contrastive,
             fp32=config.fp32_loss_math,
             query_mask=attention_mask,
+            attention_allowed_mask=attention_allowed_mask,
         )
         L_distill, _ = distillation_loss_layer(
             q_search_dict[layer_idx],
@@ -546,6 +577,7 @@ def total_loss(
             tau=config.tau_distillation,
             fp32=config.fp32_loss_math,
             query_mask=attention_mask,
+            attention_allowed_mask=attention_allowed_mask,
         )
 
         layer_losses["contrastive"].append(L_cont)
