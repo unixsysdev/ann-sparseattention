@@ -251,7 +251,7 @@ def make_all36_d128_block_config() -> Config:
     cfg.eval_every = 250
     cfg.save_every = 25
     cfg.keep_last_n_checkpoints = 20
-    cfg.eval_num_batches = 8
+    cfg.eval_num_batches = 2
     cfg.log_every = 25
     cfg.compile_search_module = False
     cfg.wandb_run_name = "all36-d128-block-causal"
