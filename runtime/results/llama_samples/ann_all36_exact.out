@@ -1,0 +1,4 @@
+  
+
+Sparse attention reduces computational cost by selectively connecting query vectors to a subset of key-value pairs, rather than all. This enables faster inference on large models. Practical tradeoff: reduced context modeling due to limited attention spans, potentially degrading long-range dependency capture. Failure mode: catastrophic forgetting of distant context when sparse connections are too restrictive, leading to hallucinations or factual errors. Sparse attention is effective in resource-constrained environments but requires careful tuning of sparsity patterns and thresholds to balance
+

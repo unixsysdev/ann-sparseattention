@@ -1,0 +1,4 @@
+  
+
+Sparse attention reduces computational cost by selectively connecting attention heads to a subset of tokens, rather than all tokens. This improves scalability in large models. Practical tradeoff: reduced context modeling due to limited token interactions, potentially degrading long-range dependency capture. Failure mode: catastrophic forgetting of key relationships when sparse connections are poorly designed—e.g., missing critical token pairs in a sequence. This can lead to hallucinated outputs or incorrect inferences. Sparse attention is effective only when sparsity
+

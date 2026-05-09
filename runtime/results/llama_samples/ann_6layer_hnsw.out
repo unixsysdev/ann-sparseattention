@@ -1,0 +1,4 @@
+  
+
+Sparse attention reduces computational cost by selectively applying attention mechanisms only to a subset of input tokens, rather than all pairs. This improves efficiency in large models by focusing computation on relevant token interactions. Tradeoff: reduced model accuracy due to missed interactions. Failure mode: if too sparse, the model may fail to capture critical dependencies, leading to hallucination or misclassification. In practice, sparse attention balances coverage and efficiency—too sparse risks losing essential context, while too dense negates performance
+

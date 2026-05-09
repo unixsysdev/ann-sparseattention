@@ -1,0 +1,1 @@
+Write a concise technical explanation of sparse attention for a systems engineer. Include one practical tradeoff and one failure mode. Keep it under 120 words.

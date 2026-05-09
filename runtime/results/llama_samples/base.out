@@ -1,0 +1,10 @@
+  
+
+Sparse attention reduces computational cost by selectively computing attention weights between a subset of query-key pairs, rather than all pairs. This improves scalability in large models.  
+
+*Tradeoff*: Reduced context modeling may lead to missed long-range dependencies, especially in sequential tasks.  
+
+*Failure mode*: If sparsity is too aggressive, it can cause catastrophic forgetting of critical relationships, such as in time-series forecasting where temporal patterns are essential.  
+
+Sparse attention enables efficient inference but requires careful tuning to
+
