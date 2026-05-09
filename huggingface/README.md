@@ -131,6 +131,14 @@ Per-layer step-500 mass@K at K=128:
 
 The next run reserves `[0, 1, 2, 35]` and trains layers `3..34`.
 
+First diagnostic from the active all32 run:
+
+| Step | Recall@K eval | PPL gap | Read |
+|---:|---:|---:|---|
+| 250 | 0.812 | +2.28% | already better than all36 best training eval |
+
+This is not a final result; the run is continuing toward step 1000.
+
 ## Positioning against related methods
 
 The paper frames this method as closest in asymptotic shape to Reformer and
@@ -151,6 +159,14 @@ This is a design-positioning table, not a claim of completed production
 superiority. The clean result proves the approach for the six-layer pilot; the
 active all32 reserved-layer run tests whether broad near-whole-model
 substitution can preserve that quality.
+
+This method targets a different deployment scenario than native
+sliding-window/state-space/hybrid architectures such as Mistral-style sliding
+window, Mamba, or Qwen3.6 Gated DeltaNet hybrids. Those models are trained from
+scratch with their sparse or hybrid mechanism in place. This work is post-hoc:
+train a base model with full attention for maximum expressivity, then add
+lightweight retrieval projections afterward to make inference sub-linear without
+changing base weights.
 
 ## Checkpoints
 
