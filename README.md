@@ -477,6 +477,43 @@ is the next planned run. The current pilot establishes that the learned
 projections retrieve attention-relevant keys; the comparison run isolates
 how much of that came from the projection vs. the ANN approximation.
 
+## Relation to other efficient attention methods
+
+The paper now frames the method against two kinds of competitors:
+
+- **Closest asymptotic ancestor: Reformer.** Reformer uses untrained LSH hashing
+  to find candidate keys, then attends within buckets. This work keeps the
+  retrieve-then-attend shape but trains the retrieval space from teacher
+  attention, instead of relying on random hashes over native Q/K.
+- **Closest practical baseline: Quest.** Quest is query-aware and strong at
+  moderate context, but scans page metadata linearly in the number of pages.
+  This work is weaker than Quest at K=128 PPL on the current slice, tied at
+  K=256, but has a different long-context scaling target via ANN retrieval.
+- **Linear/smooth approximations: Performer.** Performer changes the attention
+  computation with random feature approximations to softmax. This work preserves
+  exact softmax over the retrieved set and approximates only candidate
+  selection.
+- **Fixed sparse patterns: Longformer/BigBird.** These are efficient but not
+  fully query-aware in the sense used here; remote keys are not selected because
+  the current query needs them.
+
+Qualitative property table from the paper:
+
+| Method | Selection mechanism | Query-aware | Trained | Asymptotic | Exact softmax |
+|---|---|---|---|---|---|
+| Full attention | all keys | n/a | n/a | O(N²) | yes |
+| Reformer | LSH hashing | yes | no | O(N log N) | over bucket |
+| Performer | random features | n/a | no | O(N) | no |
+| BigBird | window + random + global | mostly no | no | O(N) | over pattern |
+| Longformer | sliding window + global | mostly no | no | O(N) | over pattern |
+| NSA-style methods | block compression/selection | partial | partial | O(N²) proxy | yes |
+| Quest | min/max page heuristic | yes | no | O(N) | over pages |
+| **This work** | **trained low-dim retrieval** | **yes** | **yes** | **O(N log N)** | **over retrieved set** |
+
+This is a design-positioning table, not a completed empirical win. The current
+clean results prove the row for the six-layer pilot; all-layer quality is still
+being tested by the active all32 reserved-layer run.
+
 ## How it works
 
 For each full-attention layer `i` we train two linear projections

@@ -131,6 +131,27 @@ Per-layer step-500 mass@K at K=128:
 
 The next run reserves `[0, 1, 2, 35]` and trains layers `3..34`.
 
+## Positioning against related methods
+
+The paper frames this method as closest in asymptotic shape to Reformer and
+closest in practical baseline behavior to Quest.
+
+| Method | Selection mechanism | Query-aware | Trained | Asymptotic | Exact softmax |
+|---|---|---|---|---|---|
+| Full attention | all keys | n/a | n/a | O(N²) | yes |
+| Reformer | LSH hashing | yes | no | O(N log N) | over bucket |
+| Performer | random features | n/a | no | O(N) | no |
+| BigBird | window + random + global | mostly no | no | O(N) | over pattern |
+| Longformer | sliding window + global | mostly no | no | O(N) | over pattern |
+| NSA-style methods | block compression/selection | partial | partial | O(N²) proxy | yes |
+| Quest | min/max page heuristic | yes | no | O(N) | over pages |
+| This work | trained low-dim retrieval | yes | yes | O(N log N) | over retrieved set |
+
+This is a design-positioning table, not a claim of completed production
+superiority. The clean result proves the approach for the six-layer pilot; the
+active all32 reserved-layer run tests whether broad near-whole-model
+substitution can preserve that quality.
+
 ## Checkpoints
 
 Important checkpoint paths in this HF repo:

@@ -646,6 +646,85 @@ test whether learned retrieval allows lower $K$ than Quest on tasks with sparse,
 long-range dependencies.
 
 \section{Related work}
+\subsection{Property-level comparison}
+The most useful comparison is not only to Quest. Quest is the closest practical
+page-selection baseline, but Reformer is closer in architectural shape:
+candidate selection is performed by an ANN-like mechanism and attention is then
+computed over a restricted set. Performer is also genuinely sub-quadratic, but
+it changes the attention computation itself by approximating the softmax kernel
+with random features. Longformer and BigBird use sparse patterns that are cheap
+but mostly fixed rather than query-adaptive. These distinctions matter because a
+long-context method can fail in different ways: it may be sub-quadratic but
+untrained, trained but still asymptotically dense, query-aware but linear in the
+number of pages, or fast but unable to represent sharp retrieval.
+
+\begin{table}[h]
+\centering
+\caption{Qualitative comparison of sparse and efficient attention mechanisms.}
+\label{tab:related-properties}
+\begin{tabular}{llllll}
+\toprule
+Method & Selection mechanism & Query-aware & Trained & Asymptotic & Exact softmax\\
+\midrule
+Full attention & all keys & n/a & n/a & $O(N^2)$ & yes\\
+Reformer & LSH hashing & yes & no & $O(N\log N)$ & over bucket\\
+Performer & random features & n/a & no & $O(N)$ & no\\
+BigBird & window + random + global & mostly no & no & $O(N)$ & over pattern\\
+Longformer & sliding window + global & mostly no & no & $O(N)$ & over pattern\\
+NSA-style methods & block compression/selection & partial & partial & $O(N^2)$ proxy & yes\\
+Quest & min/max page heuristic & yes & no & $O(N)$ & over pages\\
+This work & trained low-dim retrieval & yes & yes & $O(N\log N)$ & over retrieved set\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+This table is a positioning argument, not a completed empirical victory. The
+current experiments establish the learned-retrieval row for a clean six-layer
+pilot and show that all-layer substitution is feasible but not yet parity. The
+active all32 reserved-layer run is meant to test whether a near-whole-model
+version can preserve the six-layer quality result. Until that run and
+long-context tasks are complete, the table should be read as the design target
+and not as proof of production superiority.
+
+\paragraph{Reformer as the closest asymptotic ancestor.}
+Reformer's LSH attention can be viewed as untrained ANN-style candidate
+selection: hash the sequence, attend within nearby buckets, and avoid scoring
+every key~\citep{kitaev2020reformer}. The appealing property is genuine
+sub-quadratic scaling. The weakness is that random hash functions do not know
+which keys the model's attention actually needs. Native Q/K vectors are also not
+guaranteed to be good nearest-neighbor embeddings. This work keeps Reformer's
+``retrieve then attend'' shape but replaces untrained hashing with projections
+distilled from the teacher model's attention distribution.
+
+\paragraph{Performer and smooth attention approximations.}
+Performer approximates softmax attention with positive orthogonal random
+features, giving linear-time attention in principle. This is a different
+failure mode from sparse retrieval. Linear kernel approximations replace the
+softmax with a smoother low-rank computation, so they can lose the sharp
+selectivity needed for precise key-value retrieval. Our method does not
+approximate the softmax inside the selected set; it preserves native scaled
+dot-product attention over retrieved keys. The approximation is only in
+candidate selection.
+
+\paragraph{Fixed sparse patterns.}
+Longformer and BigBird reduce cost with local windows, global tokens, random
+connections, or structured sparse patterns~\citep{beltagy2020longformer,zaheer2020bigbird}.
+These patterns are efficient and useful, but they are not fully query-aware in
+the sense used here: the selected remote keys are not chosen because a specific
+query token currently needs them. Query-aware methods such as Quest and learned
+retrieval are better matched to long-context retrieval tasks where the relevant
+token may be far away and content-dependent.
+
+\paragraph{NSA-style block selection.}
+Recent native sparse attention systems based on block compression and block
+selection can deliver strong constant-factor speedups, but if block relevance is
+computed by comparing queries to compressed block representations across the
+sequence, the selection branch can remain asymptotically quadratic in sequence
+length up to a block-size constant. That does not make such methods unimportant:
+constant factors dominate at many practical lengths. It does mean they occupy a
+different asymptotic regime from ANN retrieval, where the intended candidate
+selection cost is sub-quadratic.
+
 \paragraph{Transformers and exact attention.}
 The Transformer introduced scaled dot-product attention as the central
 mechanism for sequence modeling~\citep{vaswani2017attention}. FlashAttention
