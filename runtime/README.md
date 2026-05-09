@@ -18,7 +18,15 @@ Runtime branch: `feat/llama-ann-runtime`.
 - `runtime/ANN_LLAMA_CPP_STATUS.md`: detailed engineering status.
 - `runtime/models/MODELS.md`: model manifest and GGUF handling notes.
 
-The 8GB GGUF files are not committed to GitHub because GitHub LFS rejects files larger than 2GB. They remain local and should be stored on Hugging Face.
+Merged ANN runtime GGUFs are hosted on Hugging Face:
+
+- [`Qwen3-4B-Instruct-2507-F16-ann-6layer-k128-v2.gguf`](https://huggingface.co/datasysdev/ann-sparseattention/blob/main/gguf/Qwen3-4B-Instruct-2507-F16-ann-6layer-k128-v2.gguf)
+- [`Qwen3-4B-Instruct-2507-F16-ann-all32-k128-v2.gguf`](https://huggingface.co/datasysdev/ann-sparseattention/blob/main/gguf/Qwen3-4B-Instruct-2507-F16-ann-all32-k128-v2.gguf)
+- [`Qwen3-4B-Instruct-2507-F16-ann-all36-k128-v2.gguf`](https://huggingface.co/datasysdev/ann-sparseattention/blob/main/gguf/Qwen3-4B-Instruct-2507-F16-ann-all36-k128-v2.gguf)
+
+These files are extremely preliminary runtime artifacts for reproducing the
+current tests. They should not be treated as production models or final
+benchmark artifacts.
 
 ## Implemented Runtime Paths
 
@@ -292,7 +300,7 @@ What is not solved yet:
 - HNSW is not production-optimized; it rebuilds indices during decode.
 - Long-context sample quality on repeated synthetic prompts is weaker for all32/all36, especially all36.
 - Prefill remains full attention, so end-to-end wall time is still prefill dominated for long prompts.
-- GGUF binaries are not on GitHub because of the 2GB LFS limit; store them on Hugging Face.
+- The original base Qwen GGUF is not mirrored in this repo; use an upstream/base local GGUF with the ANN GGUFs linked above.
 
 ## Next Runtime Work
 

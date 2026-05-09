@@ -35,7 +35,16 @@ Tested on:
 - `ann_all32`: 32-of-36 sparse substitution, reserving edge layers.
 - `ann_all36`: all attention layers sparse-substituted.
 
-The 8GB GGUF files are not committed to GitHub because GitHub LFS rejects files larger than 2GB. They remain local and should be stored on Hugging Face. See [runtime/models/MODELS.md](runtime/models/MODELS.md).
+The merged ANN runtime GGUFs are hosted on Hugging Face:
+
+- [`Qwen3-4B-Instruct-2507-F16-ann-6layer-k128-v2.gguf`](https://huggingface.co/datasysdev/ann-sparseattention/blob/main/gguf/Qwen3-4B-Instruct-2507-F16-ann-6layer-k128-v2.gguf)
+- [`Qwen3-4B-Instruct-2507-F16-ann-all32-k128-v2.gguf`](https://huggingface.co/datasysdev/ann-sparseattention/blob/main/gguf/Qwen3-4B-Instruct-2507-F16-ann-all32-k128-v2.gguf)
+- [`Qwen3-4B-Instruct-2507-F16-ann-all36-k128-v2.gguf`](https://huggingface.co/datasysdev/ann-sparseattention/blob/main/gguf/Qwen3-4B-Instruct-2507-F16-ann-all36-k128-v2.gguf)
+
+These are extremely preliminary runtime artifacts. They are useful for
+reproducing the current llama.cpp integration tests, not for production
+deployment or publication-strength performance claims. See
+[runtime/models/MODELS.md](runtime/models/MODELS.md) for the model manifest.
 
 ## Key Speed Results
 
@@ -150,7 +159,7 @@ What is not solved yet:
 - HNSW is not production-optimized; it rebuilds indices during decode.
 - all32/all36 HNSW fail exact password recall beyond 1k in this strict benchmark.
 - Prefill remains full attention.
-- GGUF binaries are too large for GitHub LFS and must live on Hugging Face or local disk.
+- The base Qwen GGUF is not mirrored here; use the upstream/base GGUF locally and the ANN GGUFs linked above for these runtime tests.
 
 ## Next Engineering Steps
 
