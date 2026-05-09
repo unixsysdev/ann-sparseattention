@@ -16,6 +16,18 @@ reduces the quality cost. The runtime is still a correctness prototype. Treat
 reported numbers as preliminary until confidence intervals, downstream
 long-context tasks, and production baselines are run.
 
+**Extremely preliminary llama.cpp runtime branch.** A separate runtime-only
+branch contains the current llama.cpp integration snapshot and raw CPU/ROCm
+smoke-test logs:
+[`feat/llama-ann-runtime`](https://github.com/unixsysdev/ann-sparseattention/tree/feat/llama-ann-runtime).
+These numbers are **not** publication-strength and should not be treated as
+production performance. They are early engineering diagnostics: exact learned
+top-K decode shows an initial long-context speed signal at 33.6K tokens, while
+the HNSW path is only a correctness bridge that rebuilds indices during decode
+and is therefore intentionally slow. The branch also includes strict password
+recall probes showing that 6-layer HNSW recalls 1K/2K/4K passwords, while
+32-layer and 36-layer HNSW are not yet reliable on that exact-recall test.
+
 Checkpoint artifacts and JSON eval outputs are mirrored on Hugging Face:
 [`datasysdev/ann-sparseattention`](https://huggingface.co/datasysdev/ann-sparseattention).
 Use `checkpoints_block_d128/search_step_1000.pt` there for the current clean
