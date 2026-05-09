@@ -7,15 +7,20 @@ and lose almost no model quality.
 
 ## Current status
 
-Research prototype. The trained projections work in a narrow 6-layer packed
-WikiText-103 pilot on `Qwen/Qwen3-4B-Instruct-2507`, but the runtime is still
-a correctness prototype. Treat reported numbers as preliminary until confidence
-intervals, downstream long-context tasks, and real baselines are run.
+Research prototype. The trained projections preserve quality in a clean
+6-layer block-causal WikiText-103 pilot on
+`Qwen/Qwen3-4B-Instruct-2507`. Broad all-layer substitution is now being tested:
+the first all-36 run is feasible but not full-attention parity, and a
+data-driven all32 reserved-layer run is active. The runtime is still a
+correctness prototype. Treat reported numbers as preliminary until confidence
+intervals, downstream long-context tasks, and production baselines are run.
 
 Checkpoint artifacts and JSON eval outputs are mirrored on Hugging Face:
 [`datasysdev/ann-sparseattention`](https://huggingface.co/datasysdev/ann-sparseattention).
 Use `checkpoints_block_d128/search_step_1000.pt` there for the current clean
-block-causal result.
+6-layer block-causal result. Use
+`checkpoints_all36_d128_block/protected/search_step_500_keep.pt` for the best
+all-36 checkpoint observed so far.
 
 **What's validated:**
 - 6-layer packed pilot on Qwen3-4B-Instruct-2507, layers
@@ -30,15 +35,23 @@ block-causal result.
   packed-with-leakage do not survive as a clean-methodology headline.
 - Capacity scaling is monotonic but saturating: d64 < d128 < d256 on mass@K,
   while d128 and d256 are effectively tied on final PPL.
-- Learned projections outperform raw-QK oracle mass in mid/late trained layers
-  (L12-L24), while early layers remain harder.
+- Clean Quest-style and paired NLL baselines are implemented. Learned retrieval
+  captures more teacher mass than Quest at equal K, but Quest is slightly
+  better at K=128 PPL and statistically tied at K=256.
+- Clean FAISS/HNSW per-segment indexing matches exact learned retrieval closely
+  at K=128/K=256, validating the ANN-compatibility claim.
+- All-36 d128 block-causal substitution was run to step 800. Best eval so far:
+  step 500, recall@K=0.816, PPL gap +3.23%. Step 750 regressed to +3.96%.
+  Per-layer mass@K shows the weakest layers are L00/L01/L02, with L35 only
+  mildly weak.
+- A follow-up `all32_d128_block` run is active: it reserves full attention on
+  `[0, 1, 2, 35]` and trains layers `3..34`.
 
 **Not yet validated (next iteration):**
 - Confidence intervals for the block-causal result over multiple seeds and
   larger eval slices.
-- Quest / RetrievalAttention baselines.
 - Long-context task quality (LongBench, RULER, needle-in-haystack).
-- 34-layer / whole-model substitution.
+- Completion of the all32 reserved-layer run and its compare/K-sweep.
 - Wall-clock speedup vs. FlashAttention/SDPA — not measured.
 - KV-cache decode-mode integration.
 - GPU-resident ANN or fused gather-attention kernel.
@@ -296,6 +309,83 @@ frozen prefill-plus-local index loses measurable teacher-attention mass on
 decode-like suffix queries. The raw result is in
 `artifacts/dynamic_proxy_8b.json`.
 
+### All-36 and all32 reserved-layer experiments
+
+The first broad substitution run trained `d_search=128` projections for all 36
+attention layers under the clean block-causal pipeline:
+
+```bash
+python train.py --config all36_d128_block
+```
+
+It is feasible, but it is not yet the quality-preserving headline. Training was
+stopped after step 800 to inspect checkpoints and start a better targeted
+follow-up.
+
+| Step | Recall@K eval | PPL gap | Read |
+|---:|---:|---:|---|
+| 250 | 0.805 | +6.27% | ranking still poor |
+| **500** | **0.816** | **+3.23%** | best checkpoint so far |
+| 750 | 0.817 | +3.96% | PPL regressed despite stable recall |
+
+The protected step-500 checkpoint is mirrored as:
+
+`checkpoints_all36_d128_block/protected/search_step_500_keep.pt`
+
+Per-layer `compare_retrieval` at K=128 shows high average retrieval fidelity
+but clear early-layer weakness:
+
+| Layer | raw-QK | learned | delta |
+|---:|---:|---:|---:|
+| L00 | 0.922 | 0.780 | -0.142 |
+| L01 | 0.918 | 0.851 | -0.067 |
+| L02 | 0.939 | 0.899 | -0.040 |
+| L03 | 0.939 | 0.924 | -0.015 |
+| L04 | 0.944 | 0.933 | -0.011 |
+| L05 | 0.964 | 0.947 | -0.017 |
+| L06 | 0.956 | 0.936 | -0.020 |
+| L07 | 0.982 | 0.982 | +0.000 |
+| L08 | 0.971 | 0.970 | -0.001 |
+| L09 | 0.959 | 0.976 | +0.017 |
+| L10 | 0.974 | 0.970 | -0.004 |
+| L11 | 0.976 | 0.975 | -0.001 |
+| L12 | 0.961 | 0.969 | +0.008 |
+| L13 | 0.971 | 0.971 | +0.000 |
+| L14 | 0.973 | 0.973 | -0.000 |
+| L15 | 0.968 | 0.972 | +0.004 |
+| L16 | 0.956 | 0.962 | +0.006 |
+| L17 | 0.959 | 0.966 | +0.007 |
+| L18 | 0.965 | 0.972 | +0.007 |
+| L19 | 0.961 | 0.968 | +0.007 |
+| L20 | 0.959 | 0.975 | +0.016 |
+| L21 | 0.966 | 0.979 | +0.014 |
+| L22 | 0.963 | 0.970 | +0.007 |
+| L23 | 0.979 | 0.984 | +0.005 |
+| L24 | 0.971 | 0.978 | +0.007 |
+| L25 | 0.986 | 0.988 | +0.002 |
+| L26 | 0.978 | 0.985 | +0.008 |
+| L27 | 0.978 | 0.983 | +0.005 |
+| L28 | 0.979 | 0.985 | +0.005 |
+| L29 | 0.982 | 0.987 | +0.005 |
+| L30 | 0.988 | 0.986 | -0.002 |
+| L31 | 0.984 | 0.984 | -0.001 |
+| L32 | 0.979 | 0.979 | +0.000 |
+| L33 | 0.977 | 0.970 | -0.007 |
+| L34 | 0.976 | 0.960 | -0.016 |
+| L35 | 0.980 | 0.967 | -0.013 |
+| avg | 0.966 | 0.960 | -0.006 |
+
+This motivates the current follow-up run:
+
+```bash
+python train.py --config all32_d128_block
+```
+
+`all32_d128_block` reserves full attention on `[0, 1, 2, 35]` and trains
+layers `3..34`. This tests whether broad substitution fails mainly because of
+the weak edge layers, or because small approximation errors compound across
+many otherwise-good layers.
+
 ### Compute / quality knobs (FLOP-counted)
 
 `L = 4096`. Compute reduction is the attention scoring step, `≈ L / K`.
@@ -336,19 +426,24 @@ will:
   FAISS path here is a research prototype (CPU index per forward, GPU↔CPU
   transfer) and is the wrong thing to time. A GPU-resident topk kernel is
   the next-step engineering.
-- **34-layer headline**: was queued and the VM was reclaimed before launch.
-  Config is wired (`make_headline_config()`); rerun is a single command on
-  any B200/H100/H200.
+- **Broad substitution**: all-36 was run and is viable but not parity
+  (+3.23% best observed PPL gap). The current all32 reserved-layer run tests
+  whether reserving `[0, 1, 2, 35]` closes that gap.
 
 The recall@K and mass@K reported here come from a 12-batch eval slice, not
 a population-level estimate. Confidence intervals and downstream tasks
 (LongBench / RULER / needle-in-haystack) are the natural next evals.
 
-### Headline run (queued)
+### Broad layer runs
 
-34 layers (every layer except 0 and 35), 8K context, 6K steps,
-~4-5h on a single B200. Tests whether the technique generalizes from a
-6-layer subset to broad layer coverage. Checkpoints will be mirrored at
+Two broad-layer configs are now wired:
+
+- `all36_d128_block`: trains all 36 layers, clean block-causal, d128. Best
+  observed checkpoint is step 500 at +3.23% PPL gap.
+- `all32_d128_block`: trains layers `3..34`, reserves `[0, 1, 2, 35]` as full
+  attention. This run is active and is the next result to watch.
+
+Checkpoints are mirrored at
 [`datasysdev/ann-sparseattention`](https://huggingface.co/datasysdev/ann-sparseattention).
 
 ## Relation to RetrievalAttention
@@ -453,22 +548,23 @@ python train.py --config pilot_d64_clean
 
 The default `Config` is the 1-day pilot:
 
-| Knob | Pilot | Headline |
+| Knob | Pilot | Broad clean runs |
 |---|---|---|
 | `seq_len` | 4096 | 8192 |
-| `batch_size` | 8 | 8 |
-| `total_steps` | 1000 | 6000 |
-| layers trained | 6 (`[4,8,12,16,20,24]`) | 34 (`range(36)` minus reserved `[0, 35]`) |
-| trainable params | 1.97M at d64; 3.93M at d128 | 11.1M at d64 |
-| `d_search` | 64 default; d128 recommended from ablation | 64 default |
+| `batch_size` | 8 | 2 with grad accumulation 4 |
+| `total_steps` | 1000 | 1000 for current all36/all32 pilots |
+| layers trained | 6 (`[4,8,12,16,20,24]`) | all36 or all32 (`[3..34]`) |
+| trainable params | 1.97M at d64; 3.93M at d128 | 23.59M all36 d128; ~20.97M all32 d128 |
+| `d_search` | 64 default; d128 recommended from ablation | d128 |
 | `K_retrieve_eval` | 128 | 128 |
 
-Pilot is the proof-of-concept; headline trains every attention layer except
-the first (raw-embedding-adjacent) and last (output-logits-adjacent), which is
-the deployment-relevant claim that the technique scales to dense application.
+Pilot is the proof-of-concept. The broad clean runs test whether the technique
+scales from a six-layer subset to dense application across most or all layers.
 
 Use `make_pilot_d128_packed_config()` to reproduce the current recommended
-pilot, or `make_headline_config()` for the broader 34-layer run.
+packed capacity pilot, `pilot_d128_block` for the clean six-layer result,
+`all36_d128_block` for all-layer substitution, or `all32_d128_block` for the
+current data-driven reserved-layer run.
 
 ## Performance choices
 
