@@ -257,3 +257,19 @@ def make_all36_d128_block_config() -> Config:
     cfg.wandb_run_name = "all36-d128-block-causal"
     cfg.checkpoint_dir = "/tmp/checkpoints_all36_d128_block"
     return cfg
+
+
+def make_all32_d128_block_config() -> Config:
+    """
+    Data-driven near-all-layer run after the all-36 pilot.
+
+    The all-36 checkpoint showed high average mass@K but clear early-layer
+    weakness at L00/L01/L02, while the last layer was only mildly below the
+    middle layers. Reserve the weak early layers and the final output-adjacent
+    layer, and train ANN projections for layers 3..34.
+    """
+    cfg = make_all36_d128_block_config()
+    cfg.reserved_full_attention_indices = [0, 1, 2, 35]
+    cfg.wandb_run_name = "all32-d128-block-causal-reserve-0-1-2-35"
+    cfg.checkpoint_dir = "/tmp/checkpoints_all32_d128_block_reserve_0_1_2_35"
+    return cfg

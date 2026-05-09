@@ -586,8 +586,10 @@ if __name__ == "__main__":
     import argparse
 
     from config import (
-        make_headline_config,
+        Config,
+        make_all32_d128_block_config,
         make_all36_d128_block_config,
+        make_headline_config,
         make_headline_d128_config,
         make_pilot_d64_clean_config,
         make_pilot_d64_packed_config,
@@ -614,6 +616,7 @@ if __name__ == "__main__":
             "headline_d64",
             "headline_d128",
             "all36_d128_block",
+            "all32_d128_block",
         ],
         help="Which preset config to use.",
     )
@@ -641,6 +644,8 @@ if __name__ == "__main__":
         cfg = make_headline_d128_config()
     elif args.config == "all36_d128_block":
         cfg = make_all36_d128_block_config()
+    elif args.config == "all32_d128_block":
+        cfg = make_all32_d128_block_config()
 
     print(f"[config] preset={args.config} run={cfg.wandb_run_name} "
           f"steps={cfg.total_steps} layers={len(get_layers_to_train(cfg))} "
