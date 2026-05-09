@@ -9,18 +9,21 @@ and lose almost no model quality.
 
 Research prototype. The trained projections preserve quality in a clean
 6-layer block-causal WikiText-103 pilot on
-`Qwen/Qwen3-4B-Instruct-2507`. Broad all-layer substitution is now being tested:
-the first all-36 run is feasible but not full-attention parity, and a
-data-driven all32 reserved-layer run is active. The runtime is still a
-correctness prototype. Treat reported numbers as preliminary until confidence
-intervals, downstream long-context tasks, and production baselines are run.
+`Qwen/Qwen3-4B-Instruct-2507`. Broad substitution now has two clean datapoints:
+substituting all 36 layers is feasible but not full-attention parity, while a
+data-driven 32-layer run that reserves edge layers `[0, 1, 2, 35]` substantially
+reduces the quality cost. The runtime is still a correctness prototype. Treat
+reported numbers as preliminary until confidence intervals, downstream
+long-context tasks, and production baselines are run.
 
 Checkpoint artifacts and JSON eval outputs are mirrored on Hugging Face:
 [`datasysdev/ann-sparseattention`](https://huggingface.co/datasysdev/ann-sparseattention).
 Use `checkpoints_block_d128/search_step_1000.pt` there for the current clean
 6-layer block-causal result. Use
 `checkpoints_all36_d128_block/protected/search_step_500_keep.pt` for the best
-all-36 checkpoint observed so far.
+all-36 checkpoint observed so far. Use
+`checkpoints_all32_d128_block_reserve_0_1_2_35/search_step_1000.pt` for the
+current broad-substitution checkpoint.
 
 **What's validated:**
 - 6-layer packed pilot on Qwen3-4B-Instruct-2507, layers
@@ -40,18 +43,22 @@ all-36 checkpoint observed so far.
   better at K=128 PPL and statistically tied at K=256.
 - Clean FAISS/HNSW per-segment indexing matches exact learned retrieval closely
   at K=128/K=256, validating the ANN-compatibility claim.
-- All-36 d128 block-causal substitution was run to step 800. Best eval so far:
+- All-36 d128 block-causal substitution was run to step 800. Best eval:
   step 500, recall@K=0.816, PPL gap +3.23%. Step 750 regressed to +3.96%.
   Per-layer mass@K shows the weakest layers are L00/L01/L02, with L35 only
   mildly weak.
-- A follow-up `all32_d128_block` run is active: it reserves full attention on
-  `[0, 1, 2, 35]` and trains layers `3..34`.
+- The `all32_d128_block` follow-up reserves full attention on `[0, 1, 2, 35]`
+  and trains layers `3..34`. It converged by step 500 and finished step 1000
+  at recall@K=0.825 and +1.746% PPL gap in training eval. A post-hoc exact
+  K-sweep on the final checkpoint gives +0.590% PPL gap at K=128 and -0.062%
+  at K=256 on a 2-batch clean block-causal slice.
 
 **Not yet validated (next iteration):**
 - Confidence intervals for the block-causal result over multiple seeds and
   larger eval slices.
 - Long-context task quality (LongBench, RULER, needle-in-haystack).
-- Completion of the all32 reserved-layer run and its compare/K-sweep.
+- A controlled coverage Pareto sweep, especially 12-, 18-, and 20-layer
+  configurations, to locate the zero-gap broad-substitution point.
 - Wall-clock speedup vs. FlashAttention/SDPA — not measured.
 - KV-cache decode-mode integration.
 - GPU-resident ANN or fused gather-attention kernel.
@@ -375,7 +382,7 @@ but clear early-layer weakness:
 | L35 | 0.980 | 0.967 | -0.013 |
 | avg | 0.966 | 0.960 | -0.006 |
 
-This motivates the current follow-up run:
+This motivated the reserved-edge follow-up run:
 
 ```bash
 python train.py --config all32_d128_block
@@ -384,15 +391,54 @@ python train.py --config all32_d128_block
 `all32_d128_block` reserves full attention on `[0, 1, 2, 35]` and trains
 layers `3..34`. This tests whether broad substitution fails mainly because of
 the weak edge layers, or because small approximation errors compound across
-many otherwise-good layers.
-
-First diagnostic from the active all32 run:
+many otherwise-good layers. The run finished cleanly at step 1000 with 20.97M
+trained search-projection parameters:
 
 | Step | Recall@K eval | PPL gap | Read |
 |---:|---:|---:|---|
-| 250 | 0.812 | +2.28% | already better than all36 best training eval |
+| 250 | 0.812 | +2.283% | already better than all36 best training eval |
+| 500 | 0.823 | +1.753% | converged to the final quality band |
+| 750 | 0.825 | +1.943% | small eval fluctuation |
+| 1000 | 0.825 | +1.746% | final checkpoint; essentially tied with step 500 |
 
-This is not a final result; the run is continuing toward step 1000.
+The all32 result is the current broad-substitution headline. It is not
+full-attention parity at K=128 in training eval, but it cuts the all36 quality
+cost roughly in half while still substituting 32 of 36 layers. Post-hoc
+`compare_retrieval` on the final checkpoint shows the reserved-edge hypothesis
+did what it was supposed to do: on the substituted layers, learned retrieval
+matches raw-QK retrieval mass (K=128 learned 0.971 vs raw 0.969; K=256 learned
+0.993 vs raw 0.994). The remaining PPL cost is therefore more likely compound
+approximation error than a single bad substituted layer.
+
+Exact K-sweep on the final all32 checkpoint, 2-batch clean block-causal slice
+(`PPL_full = 20.5349`):
+
+| K | mass@K | Recall@K | sparse PPL | PPL gap |
+|---:|---:|---:|---:|---:|
+| 16 | 0.546 | 0.518 | 24.86 | +21.064% |
+| 32 | 0.627 | 0.572 | 21.85 | +6.422% |
+| 64 | 0.722 | 0.652 | 20.94 | +1.974% |
+| 128 | 0.807 | 0.746 | 20.66 | +0.590% |
+| 256 | 0.902 | 0.876 | 20.52 | -0.062% |
+
+K=512 is intentionally omitted from this table. The current script produced a
+valid sparse-attention PPL line for K=512 but zero mass/recall, which is an
+edge-case bug in the metric path when K exceeds the number of valid causal keys
+for most same-segment queries. It should be rerun after fixing the metric
+handling; the publishable sweep for now is K <= 256.
+
+The emerging coverage picture is more useful than a single number:
+
+| Configuration | Layers substituted | Coverage | PPL gap | Read |
+|---|---:|---:|---:|---|
+| 6-layer clean pilot | 6/36 | 17% | +0.07% at K=128 | quality-preserving pilot |
+| all32 reserved-edge | 32/36 | 89% | +1.746% train eval; +0.590% exact sweep | near-parity broad substitution |
+| all36 | 36/36 | 100% | +3.23% best observed | full substitution costs quality |
+
+This suggests layer coverage is itself a Pareto knob. The current data is not
+enough to claim an optimal coverage ratio, but it strongly suggests the best
+deployment point is intermediate rather than "sparsify everything." A 12/18/20
+layer coverage sweep is the next clean experiment.
 
 ### Compute / quality knobs (FLOP-counted)
 
@@ -434,9 +480,10 @@ will:
   FAISS path here is a research prototype (CPU index per forward, GPU↔CPU
   transfer) and is the wrong thing to time. A GPU-resident topk kernel is
   the next-step engineering.
-- **Broad substitution**: all-36 was run and is viable but not parity
-  (+3.23% best observed PPL gap). The current all32 reserved-layer run tests
-  whether reserving `[0, 1, 2, 35]` closes that gap.
+- **Broad substitution**: all-36 is viable but not parity (+3.23% best
+  observed PPL gap). The all32 reserved-edge run reduces the cost to +1.746%
+  in training eval and +0.590% at K=128 in the post-hoc exact sweep, with
+  parity at K=256 on the small sweep.
 
 The recall@K and mass@K reported here come from a 12-batch eval slice, not
 a population-level estimate. Confidence intervals and downstream tasks
@@ -449,7 +496,9 @@ Two broad-layer configs are now wired:
 - `all36_d128_block`: trains all 36 layers, clean block-causal, d128. Best
   observed checkpoint is step 500 at +3.23% PPL gap.
 - `all32_d128_block`: trains layers `3..34`, reserves `[0, 1, 2, 35]` as full
-  attention. This run is active and is the next result to watch.
+  attention. Final step-1000 checkpoint: recall@K=0.825 and +1.746% PPL gap
+  in training eval; exact sweep reaches +0.590% at K=128 and parity at K=256
+  on a 2-batch clean slice.
 
 Checkpoints are mirrored at
 [`datasysdev/ann-sparseattention`](https://huggingface.co/datasysdev/ann-sparseattention).
@@ -519,8 +568,9 @@ Qualitative property table from the paper:
 | **This work** | **trained low-dim retrieval** | **yes** | **yes** | **O(N log N)** | **over retrieved set** |
 
 This is a design-positioning table, not a completed empirical win. The current
-clean results prove the row for the six-layer pilot; all-layer quality is still
-being tested by the active all32 reserved-layer run.
+clean results prove the row for the six-layer pilot and show that broad
+substitution becomes usable when weak edge layers are reserved. All-layer
+quality is not yet parity.
 
 The method also targets a different deployment scenario than native
 sliding-window or state-space/hybrid architectures such as Mistral-style
@@ -618,7 +668,7 @@ scales from a six-layer subset to dense application across most or all layers.
 Use `make_pilot_d128_packed_config()` to reproduce the current recommended
 packed capacity pilot, `pilot_d128_block` for the clean six-layer result,
 `all36_d128_block` for all-layer substitution, or `all32_d128_block` for the
-current data-driven reserved-layer run.
+data-driven reserved-edge broad-substitution run.
 
 ## Performance choices
 

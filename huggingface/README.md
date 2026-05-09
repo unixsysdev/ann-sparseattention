@@ -46,8 +46,11 @@ Broad-layer experiments:
 - All-36 step 500: recall@K=0.816, PPL gap +3.23%.
 - All-36 step 750 regressed to +3.96% despite stable recall.
 - Per-layer mass@K identified L00/L01/L02 as the weak early layers.
-- A follow-up all32 run reserves full attention on `[0, 1, 2, 35]` and trains
-  layers `3..34`; checkpoints will be mirrored here as they become useful.
+- The all32 reserved-edge run reserves full attention on `[0, 1, 2, 35]` and
+  trains layers `3..34`. Final step 1000: recall@K=0.825, +1.746% PPL gap in
+  training eval, and 20.97M trained search-projection parameters. The exact
+  K-sweep gives +0.590% PPL gap at K=128 and -0.062% at K=256 on a small clean
+  block-causal slice.
 
 ## Important results
 
@@ -98,7 +101,7 @@ This validates that the learned search vectors are compatible with
 off-the-shelf ANN. It is not a wall-clock result: the prototype uses CPU FAISS
 and per-forward index construction.
 
-### All-36 result so far
+### All-36 and all32 broad-layer results
 
 | Step | Recall@K eval | PPL gap |
 |---:|---:|---:|
@@ -129,15 +132,53 @@ Per-layer step-500 mass@K at K=128:
 | L35 | 0.980 | 0.967 | -0.013 |
 | avg | 0.966 | 0.960 | -0.006 |
 
-The next run reserves `[0, 1, 2, 35]` and trains layers `3..34`.
+This diagnostic motivated reserving `[0, 1, 2, 35]` as full-attention layers and
+training only layers `3..34`.
 
-First diagnostic from the active all32 run:
+Final all32 reserved-edge training trajectory:
 
 | Step | Recall@K eval | PPL gap | Read |
 |---:|---:|---:|---|
-| 250 | 0.812 | +2.28% | already better than all36 best training eval |
+| 250 | 0.812 | +2.283% | already better than all36 best training eval |
+| 500 | 0.823 | +1.753% | converged to final quality band |
+| 750 | 0.825 | +1.943% | small eval fluctuation |
+| 1000 | 0.825 | +1.746% | final checkpoint; essentially tied with step 500 |
 
-This is not a final result; the run is continuing toward step 1000.
+The all32 checkpoint is the current broad-substitution result. It is not
+full-attention parity at K=128 in training eval, but it reduces the all36
+quality cost while still substituting 32 of 36 layers. Post-hoc
+`compare_retrieval` on step 1000 shows learned retrieval matches raw-QK mass on
+the substituted layers: at K=128, learned mass is 0.971 vs raw-QK 0.969; at
+K=256, learned mass is 0.993 vs raw-QK 0.994.
+
+Exact K-sweep on the final all32 checkpoint, 2-batch clean block-causal slice
+(`PPL_full = 20.5349`):
+
+| K | mass@K | Recall@K | sparse PPL | PPL gap |
+|---:|---:|---:|---:|---:|
+| 16 | 0.546 | 0.518 | 24.86 | +21.064% |
+| 32 | 0.627 | 0.572 | 21.85 | +6.422% |
+| 64 | 0.722 | 0.652 | 20.94 | +1.974% |
+| 128 | 0.807 | 0.746 | 20.66 | +0.590% |
+| 256 | 0.902 | 0.876 | 20.52 | -0.062% |
+
+K=512 is intentionally omitted from this table. The current script produced a
+valid sparse-attention PPL line for K=512 but zero mass/recall, which is an
+edge-case bug in the metric path when K exceeds the number of valid causal keys
+for most same-segment queries. It should be rerun after fixing the metric
+handling; the publishable sweep for now is K <= 256.
+
+Coverage now looks like a real deployment knob:
+
+| Configuration | Layers substituted | Coverage | PPL gap | Read |
+|---|---:|---:|---:|---|
+| Clean six-layer pilot | 6/36 | 17% | +0.07% at K=128 | quality-preserving pilot |
+| all32 reserved-edge | 32/36 | 89% | +1.746% train eval; +0.590% exact sweep | near-parity broad substitution |
+| all36 | 36/36 | 100% | +3.23% best observed | full substitution costs quality |
+
+This is not yet enough to claim an optimal coverage ratio, but it suggests the
+best deployment point is intermediate rather than "sparsify everything." A
+12/18/20-layer coverage sweep is the next clean experiment.
 
 ## Positioning against related methods
 
@@ -156,9 +197,10 @@ closest in practical baseline behavior to Quest.
 | This work | trained low-dim retrieval | yes | yes | O(N log N) | over retrieved set |
 
 This is a design-positioning table, not a claim of completed production
-superiority. The clean result proves the approach for the six-layer pilot; the
-active all32 reserved-layer run tests whether broad near-whole-model
-substitution can preserve that quality.
+superiority. The clean result proves the approach for the six-layer pilot, and
+the all32 reserved-edge run shows broad substitution can get close to parity
+when weak edge layers remain full attention. All36 full substitution is still
+not parity.
 
 This method targets a different deployment scenario than native
 sliding-window/state-space/hybrid architectures such as Mistral-style sliding
@@ -175,7 +217,9 @@ Important checkpoint paths in this HF repo:
 - `checkpoints_block_d128/search_step_1000.pt`: clean six-layer d128 parity checkpoint.
 - `checkpoints_all36_d128_block/protected/search_step_500_keep.pt`: best observed all-36 checkpoint so far.
 - `checkpoints_all36_d128_block/search_step_800.pt`: latest all-36 checkpoint before stopping for analysis.
-- `checkpoints_all32_d128_block_reserve_0_1_2_35/`: active follow-up, uploaded as useful checkpoints are saved.
+- `checkpoints_all32_d128_block_reserve_0_1_2_35/search_step_1000.pt`: final all32 reserved-edge checkpoint.
+- `checkpoints_all32_d128_block_reserve_0_1_2_35/search_step_1000.compare_retrieval.json`: all32 per-layer retrieval comparison.
+- `checkpoints_all32_d128_block_reserve_0_1_2_35/search_step_1000.k_sweep_exact.json`: all32 exact K-sweep.
 
 These checkpoints contain the trained search projection module and optimizer
 state. They do not contain or modify the base Qwen model weights.
@@ -187,6 +231,8 @@ state. They do not contain or modify the base Qwen model weights.
 - No autoregressive KV-cache integration yet.
 - Dynamic indexing is currently supported only by a retrieval-mass proxy.
 - Main clean results are single-model and mostly single-seed.
-- All-36 broad substitution is not full-attention parity yet.
+- All-36 broad substitution is not full-attention parity.
+- The all32 result is near parity on a small slice but still needs larger eval
+  slices, task benchmarks, and a coverage Pareto sweep.
 
 Use the GitHub repository for runnable code, scripts, and the LaTeX paper draft.

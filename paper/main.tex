@@ -43,15 +43,20 @@ space captures more teacher-attention mass than a Quest-style page baseline at
 equal token budget, though paired perplexity is tied with Quest at $K=256$ and
 slightly worse at $K=128$. A CPU FAISS/HNSW prototype tracks exact learned
 retrieval on the clean evaluation slice, demonstrating ANN compatibility, but
-not production wall-clock speedup. New all-layer experiments show that applying
-the same substitution to all 36 layers is feasible but not yet parity: the best
-all-36 checkpoint observed so far is step 500 with +3.23\% relative PPL gap, and
-per-layer retrieval diagnostics identify layers 0--2 as the weakest. A
-data-driven follow-up run now reserves layers 0, 1, 2, and 35 as full attention
-while training layers 3--34. The central claim is therefore narrow and
-falsifiable: learned search projections can make attention-relevant key
-selection compatible with standard ANN retrieval, preserving model quality in a
-clean pilot while replacing dense candidate scoring with a sub-quadratic
+not production wall-clock speedup. New broad-layer experiments show that
+coverage is a quality/speed knob rather than a binary choice. Substituting all
+36 layers is feasible but costs quality: the best all-36 checkpoint observed so
+far is step 500 with +3.23\% relative PPL gap, and per-layer retrieval
+diagnostics identify layers 0--2 as the weakest. Reserving layers 0, 1, 2, and
+35 while substituting layers 3--34 improves the result substantially: the
+32-layer run converges by step 500 and finishes at step 1000 with +1.746\%
+training-eval PPL gap, Recall@K 0.825, and 20.97M trainable parameters. A
+post-hoc exact K-sweep on the final checkpoint gives +0.590\% PPL gap at
+$K=128$ and -0.062\% at $K=256$ on a 2-batch slice. The central claim is
+therefore narrow and falsifiable: learned search projections can make
+attention-relevant key selection compatible with standard ANN retrieval,
+preserving model quality in a clean pilot and enabling near-parity broad-layer
+substitution while replacing dense candidate scoring with a sub-quadratic
 retrieval interface.
 \end{abstract}
 
@@ -109,9 +114,9 @@ The contribution is deliberately modest:
     \item A FAISS/HNSW correctness prototype showing that the learned vectors
     are compatible with an off-the-shelf ANN index.
     \item An all-36-layer feasibility experiment showing that broad substitution
-    currently compounds into a +3--4\% PPL gap, plus a new data-driven reserved
-    layer experiment intended to test whether full attention on the weakest edge
-    layers recovers parity.
+    compounds into a +3--4\% PPL gap, and a data-driven 32-layer reserved-edge
+    experiment showing a much smaller +1--2\% gap with exact K-sweep parity at
+    larger $K$.
     \item A sober accounting of what is not yet shown: no measured wall-clock
     speedup, no decode-mode KV-cache integration, no long-context task
     validation, and no multi-seed confidence intervals.
@@ -584,14 +589,63 @@ the network. Layer 0 is the main outlier, layer 1 is weak, and layer 2 is
 borderline. Layer 35 is mildly below raw-QK but not the primary failure mode.
 Based on this, the next experiment reserves layers 0, 1, 2, and 35 as full
 attention and trains learned retrieval for layers 3--34. That run is named
-\texttt{all32-d128-block-causal-reserve-0-1-2-35}. At the time of this draft,
-the run is active. The first diagnostic is encouraging: at step 250, all32
-achieves Recall@K 0.812 and +2.283\% relative PPL gap, already better than the
-best observed all-36 training-eval point (+3.227\%). This is not yet a final
-result; the run is continuing to step 1000. It is the right next test because it
-asks whether broad substitution fails because of a few edge layers or because
-small per-layer errors compound even when every individual layer has high
-Mass@K.
+\texttt{all32-d128-block-causal-reserve-0-1-2-35}. This run substitutes 32 of
+36 layers, trains 20.97M search-projection parameters, and keeps only four
+layers as full attention. It directly tests whether broad substitution fails
+because of a few edge layers or because small per-layer errors compound even
+when every individual layer has high Mass@K.
+
+\begin{table}[h]
+\centering
+\caption{All32 reserved-edge training trajectory.}
+\begin{tabular}{rrr}
+\toprule
+Step & Recall@K eval & Relative PPL gap\\
+\midrule
+250 & 0.812 & +2.283\%\\
+500 & 0.823 & +1.753\%\\
+750 & 0.825 & +1.943\%\\
+1000 & 0.825 & +1.746\%\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The result is stable rather than peak-then-regress: step 1000 is essentially
+identical to step 500. This is the current broad-substitution headline. It is
+not full parity at $K=128$ in the training eval, but it is a large improvement
+over the all-36 run while retaining 89\% layer coverage. Post-hoc
+compare-retrieval on step 1000 shows that, on the substituted layers, learned
+retrieval matches raw-QK mass: learned Mass@K=128 is 0.971 versus 0.969 for
+raw-QK, and learned Mass@K=256 is 0.993 versus 0.994 for raw-QK. The edge-layer
+reservation therefore removes the main per-layer retrieval outliers; the
+remaining quality cost is more plausibly a compound approximation effect.
+
+\begin{table}[h]
+\centering
+\caption{All32 step-1000 exact K-sweep on a 2-batch clean block-causal slice.}
+\begin{tabular}{rrrrr}
+\toprule
+$K$ & Mass@K & Recall@K & Sparse PPL & Relative PPL gap\\
+\midrule
+16 & 0.546 & 0.518 & 24.86 & +21.064\%\\
+32 & 0.627 & 0.572 & 21.85 & +6.422\%\\
+64 & 0.722 & 0.652 & 20.94 & +1.974\%\\
+128 & 0.807 & 0.746 & 20.66 & +0.590\%\\
+256 & 0.902 & 0.876 & 20.52 & -0.062\%\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The K-sweep clarifies the deployment knob. At $K=128$, 32-layer substitution is
+near parity on the exact sweep; at $K=256$, it is statistically indistinguishable
+from full attention on this small slice. Lower $K$ values expose the expected
+quality cost. This supports a practical interpretation: broad sparse
+substitution is viable, but the deployment point should be selected jointly over
+layer coverage and $K$. A $K=512$ run produced a valid sparse-attention PPL line
+but zero Mass@K/Recall@K because of an edge-case bug in the metric path when
+$K$ exceeds the number of valid causal keys for most same-segment queries. We
+therefore omit it from the headline table until the metric handling is fixed
+and the point is rerun.
 
 \section{Discussion}
 \subsection{What the result proves}
@@ -644,9 +698,10 @@ uses dense-style tensor expansion internally for gather. This is a correctness
 prototype.
 
 The current repository also does not prove full-model parity. The clean 6-layer
-result is near parity, but the all-36 run observed so far has a +3--4\% PPL
-gap. The new all32 reserved-layer run is designed to test whether this is mostly
-an edge-layer issue.
+result is near parity, and the all32 reserved-edge run is near parity at
+$K=128$ and parity at $K=256$ on a small exact K-sweep, but the all-36 run
+observed so far has a +3--4\% PPL gap. Full substitution remains a harder
+setting.
 
 The current repository does not prove long-context task quality. WikiText
 perplexity is a useful first sanity check but is not a substitute for LongBench,
@@ -673,6 +728,33 @@ retrieval becomes interesting when:
 The next experiments should therefore not merely repeat WikiText. They should
 test whether learned retrieval allows lower $K$ than Quest on tasks with sparse,
 long-range dependencies.
+
+\subsection{Coverage as a Pareto knob}
+The broad-layer results suggest that substitution coverage is itself an
+important hyperparameter. The current coverage points are:
+\begin{table}[h]
+\centering
+\caption{Layer coverage vs. quality cost. Values come from different eval
+slices and should be read as a qualitative Pareto curve, not a single controlled
+sweep.}
+\begin{tabular}{rrrrl}
+\toprule
+Configuration & Layers substituted & Coverage & PPL gap & Interpretation\\
+\midrule
+6-layer clean pilot & 6/36 & 17\% & +0.07\% at $K=128$ & quality-preserving pilot\\
+All32 reserved-edge & 32/36 & 89\% & +1.746\% train eval; +0.590\% exact sweep & near-parity broad substitution\\
+All36 & 36/36 & 100\% & +3.227\% best observed & full substitution costs quality\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+This is not yet enough to claim an optimal coverage ratio, but it strongly
+suggests that the best deployment point is intermediate rather than simply
+``sparsify everything.'' Edge layers matter, and approximation errors compound
+when every layer is substituted. The next clean experiment is a coverage
+Pareto sweep, for example 12-, 18-, and 20-layer configurations, to test whether
+the zero-gap point lies around the 50--60\% coverage range implied by simple
+interpolation between the current points.
 
 \section{Related work}
 \subsection{Property-level comparison}
@@ -709,11 +791,11 @@ This work & trained low-dim retrieval & yes & yes & $O(N\log N)$ & over retrieve
 
 This table is a positioning argument, not a completed empirical victory. The
 current experiments establish the learned-retrieval row for a clean six-layer
-pilot and show that all-layer substitution is feasible but not yet parity. The
-active all32 reserved-layer run is meant to test whether a near-whole-model
-version can preserve the six-layer quality result. Until that run and
-long-context tasks are complete, the table should be read as the design target
-and not as proof of production superiority.
+pilot and show that broad substitution is feasible when weak edge layers are
+reserved. The all32 result is near parity but not a completed production
+benchmark, and the all36 result is not parity. Until longer eval slices,
+long-context tasks, and wall-clock kernels are complete, the table should be
+read as the design target and not as proof of production superiority.
 
 \paragraph{Reformer as the closest asymptotic ancestor.}
 Reformer's LSH attention can be viewed as untrained ANN-style candidate
@@ -802,7 +884,9 @@ than a promising research prototype:
     exact learned-search topK vs FAISS learned-search topK.
     \item Long-context task evaluation on LongBench, RULER, passkey retrieval,
     and needle-in-haystack.
-    \item Completion and evaluation of the active all32 reserved-layer run.
+    \item A controlled coverage Pareto sweep, including intermediate 12--20
+    layer configurations, to locate the maximum coverage point that preserves
+    full-attention quality.
     \item Decode-mode KV-cache integration with incremental index updates.
     \item GPU-resident retrieval and fused sparse gather-attention kernels.
     \item Measured wall-clock latency and memory footprint against
@@ -824,13 +908,16 @@ The clean pilot result is encouraging but narrow: six substituted layers of
 Qwen3-4B-Instruct-2507 preserve WikiText perplexity under block-causal masking,
 and FAISS/HNSW closely tracks exact learned retrieval. Compared with Quest,
 learned retrieval captures more teacher-attention mass but does not yet deliver
-a clean perplexity win. The first all-36 result shows that broad substitution is
+a clean perplexity win. The first all-36 result shows that full substitution is
 feasible but still costs +3--4\% relative PPL under the current hyperparameters.
-The result should therefore be framed as an ANN-compatibility and
-retrieval-fidelity contribution, not as a completed fast-attention system.
+The all32 reserved-edge result is stronger: substituting layers 3--34 reaches
++1.746\% PPL gap in training eval and +0.590\% at $K=128$ in a small exact
+K-sweep, with $K=256$ effectively tied with full attention. The result should
+therefore be framed as an ANN-compatibility, retrieval-fidelity, and coverage
+Pareto contribution, not as a completed fast-attention system.
 
-The path to a stronger claim is clear: finish the all32 reserved-layer run, run
-long-context tasks, integrate decode-mode dynamic indexing, and demonstrate
+The path to a stronger claim is clear: fill in the intermediate coverage curve,
+run long-context tasks, integrate decode-mode dynamic indexing, and demonstrate
 measured latency gains with a GPU-resident retrieval kernel. Until then, the
 correct title is aspirational but defensible: Make Attention Sub-Quadratic
 Again.
