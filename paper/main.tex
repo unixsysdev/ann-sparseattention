@@ -585,10 +585,13 @@ borderline. Layer 35 is mildly below raw-QK but not the primary failure mode.
 Based on this, the next experiment reserves layers 0, 1, 2, and 35 as full
 attention and trains learned retrieval for layers 3--34. That run is named
 \texttt{all32-d128-block-causal-reserve-0-1-2-35}. At the time of this draft,
-the run is active; the first checkpoint at step 25 has been saved. This is the
-right next test because it asks whether broad substitution fails because of a
-few edge layers or because small per-layer errors compound even when every
-individual layer has high Mass@K.
+the run is active. The first diagnostic is encouraging: at step 250, all32
+achieves Recall@K 0.812 and +2.283\% relative PPL gap, already better than the
+best observed all-36 training-eval point (+3.227\%). This is not yet a final
+result; the run is continuing to step 1000. It is the right next test because it
+asks whether broad substitution fails because of a few edge layers or because
+small per-layer errors compound even when every individual layer has high
+Mass@K.
 
 \section{Discussion}
 \subsection{What the result proves}
@@ -607,6 +610,32 @@ This is important because it separates two problems:
 \end{enumerate}
 The pilot gives evidence for the first question. It does not yet solve the
 second.
+
+\subsection{Decoupling training-time and inference-time architecture}
+Sliding-window attention, Longformer-style sparse attention, and state-space
+hybrid models such as Mamba or Qwen3.6's Gated DeltaNet hybrid are deployed as
+native architectures: they are trained from scratch with the sparse or hybrid
+mechanism already in place. These approaches can achieve strong inference
+efficiency, but they require designing and training the model around the chosen
+attention pattern. Our method targets a different deployment scenario: enabling
+sparse attention on already-trained full-attention models without retraining the
+base. For pretrained models such as Qwen, Llama, or GPT-family models, where
+training cost prohibits full retraining, post-hoc retrieval-based sparse
+attention provides a complementary path. Whether to design new models with
+native sparse attention or apply post-hoc retrieval to existing models is an
+architectural decision that depends on training budget and deployment
+requirements.
+
+The broader motivation is to decouple training expressivity from inference
+efficiency. Full attention remains the safest training-time architecture for
+learning complex dependencies and reasoning patterns at frontier scale, while
+its efficiency disadvantages matter most during inference, where KV-cache
+traffic and candidate scoring constrain deployment economics. This method
+exploits that asymmetry: train with full attention for maximum expressivity,
+then add lightweight retrieval projections to enable sub-linear inference
+without modifying the base model's weights. In this framing, the base model can
+use the strongest training architecture, while deployment can use a different
+candidate-selection interface optimized for long-context inference.
 
 \subsection{What the result does not prove}
 The current repository does not prove measured wall-clock speedup. The FAISS

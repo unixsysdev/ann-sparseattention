@@ -386,6 +386,14 @@ layers `3..34`. This tests whether broad substitution fails mainly because of
 the weak edge layers, or because small approximation errors compound across
 many otherwise-good layers.
 
+First diagnostic from the active all32 run:
+
+| Step | Recall@K eval | PPL gap | Read |
+|---:|---:|---:|---|
+| 250 | 0.812 | +2.28% | already better than all36 best training eval |
+
+This is not a final result; the run is continuing toward step 1000.
+
 ### Compute / quality knobs (FLOP-counted)
 
 `L = 4096`. Compute reduction is the attention scoring step, `≈ L / K`.
@@ -513,6 +521,15 @@ Qualitative property table from the paper:
 This is a design-positioning table, not a completed empirical win. The current
 clean results prove the row for the six-layer pilot; all-layer quality is still
 being tested by the active all32 reserved-layer run.
+
+The method also targets a different deployment scenario than native
+sliding-window or state-space/hybrid architectures such as Mistral-style
+sliding window, Mamba, or Qwen3.6 Gated DeltaNet hybrids. Those approaches are
+trained from scratch with their sparse or hybrid mechanism in place. This work
+is post-hoc: train a base model with full attention for maximum expressivity,
+then add lightweight retrieval projections afterward to make inference
+sub-linear without changing base weights. The intended benefit is decoupling
+training-time architecture from inference-time architecture.
 
 ## How it works
 
